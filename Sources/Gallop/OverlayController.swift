@@ -50,7 +50,7 @@ final class OverlayController {
     }
 
     private func refresh() {
-        guard enabled, !sessions.isEmpty else {
+        guard enabled else {
             timer?.invalidate()
             timer = nil
             runners.values.forEach {
@@ -62,9 +62,17 @@ final class OverlayController {
             return
         }
 
-        ensureWindow()
+        if !sessions.isEmpty { ensureWindow() }
         syncRunners()
         refreshSprites()
+
+        // Keep ticking while finished runners are still dashing off-screen.
+        guard !runners.isEmpty else {
+            timer?.invalidate()
+            timer = nil
+            window?.orderOut(nil)
+            return
+        }
         if timer == nil {
             timer = Timer.scheduledTimer(withTimeInterval: tickInterval, repeats: true) { [weak self] _ in
                 self?.tick()
@@ -95,10 +103,12 @@ final class OverlayController {
     private func syncRunners() {
         guard let content = window?.contentView else { return }
 
-        for (pid, runner) in runners where sessions[pid] == nil {
-            runner.view.removeFromSuperview()
+        // Runners whose session vanished are not removed here — tick() lets
+        // them dash off the left edge first. Their wall goes away immediately.
+        for (pid, var runner) in runners where sessions[pid] == nil && runner.wall != nil {
             runner.wall?.removeFromSuperview()
-            runners.removeValue(forKey: pid)
+            runner.wall = nil
+            runners[pid] = runner
         }
 
         for pid in order {
@@ -160,7 +170,23 @@ final class OverlayController {
     private func tick() {
         guard let content = window?.contentView else { return }
         for (pid, var runner) in runners {
-            guard let session = sessions[pid] else { continue }
+            guard let session = sessions[pid] else {
+                // Finished: dash off the left edge at full gallop, then leave.
+                runner.x -= 5
+                runner.tickCount += 1
+                if runner.tickCount % 3 == 0 {
+                    runner.frameIndex = (runner.frameIndex + 1) % 4
+                    runner.view.image = Sprites.frames(for: runner.emoji)[runner.frameIndex]
+                }
+                if runner.x < -Sprites.size.width {
+                    runner.view.removeFromSuperview()
+                    runners.removeValue(forKey: pid)
+                } else {
+                    runner.view.setFrameOrigin(NSPoint(x: runner.x, y: baseY(for: runner)))
+                    runners[pid] = runner
+                }
+                continue
+            }
             if session.needsAttention {
                 // Halted at the wall in a standing pose; only the nudge rhythm runs.
                 runner.phase += 0.12
@@ -181,6 +207,11 @@ final class OverlayController {
             }
             runners[pid] = runner
             position(runner, session: session)
+        }
+        if runners.isEmpty {
+            timer?.invalidate()
+            timer = nil
+            window?.orderOut(nil)
         }
     }
 
