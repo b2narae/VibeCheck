@@ -44,10 +44,40 @@ The menu bar icon itself summarizes everything: a galloping animal while work is
 happening, 🧱 when a session is blocked on you, 🐴 when sessions are idle, 💤 when
 nothing is running.
 
+## Hooks integration (recommended)
+
+Turn on **"Claude Code 훅 연동"** in the menu and Gallop stops guessing: Claude
+Code tells it directly when a turn starts, when it ends, and when it is blocked
+waiting on you. No more waiting for a CPU threshold, and permission prompts raise
+the wall the instant they appear.
+
+```bash
+/Applications/Gallop.app/Contents/MacOS/Gallop --install-hooks    # or use the menu
+/Applications/Gallop.app/Contents/MacOS/Gallop --hooks-status
+/Applications/Gallop.app/Contents/MacOS/Gallop --uninstall-hooks
+```
+
+Enabling it merges five hook entries into `~/.claude/settings.json`, leaving
+every other setting and any hooks you already have untouched, and writes a
+one-time backup to `settings.json.gallop-backup`. Uninstalling removes only
+Gallop's own entries.
+
+Only turn-boundary events are registered — `SessionStart`, `UserPromptSubmit`,
+`Notification`, `Stop`, `SessionEnd`. Hooks run synchronously and block Claude
+Code while they execute, so per-tool events (which fire dozens of times per turn)
+are deliberately left alone. The hook is the Gallop binary itself in `--hook`
+mode: it reads the event, writes a small file under `~/.gallop/sessions/`, and
+exits in about 10 ms.
+
+Without hooks, everything still works through the heuristics below — hooks simply
+replace inference with fact wherever they are available.
+
 ## How detection works
 
-Gallop polls the process list every 1.5 seconds and tracks `claude` / `gemini` /
-`codex` processes per PID, skipping resident helpers like daemons and pty hosts.
+When hooks are not installed — or for a session that has not reported yet —
+Gallop falls back to inference. It polls the process list every 1.5 seconds and
+tracks `claude` / `gemini` / `codex` processes per PID, skipping resident helpers
+like daemons and pty hosts.
 Each session's working directory comes from libproc (`proc_pidinfo`), so no
 subprocesses are spawned per poll.
 
@@ -102,9 +132,9 @@ Handy flags while developing:
 ## Roadmap
 
 - [ ] Launch at login (SMAppService)
-- [ ] Claude Code hooks integration for exact start/stop signals
 - [ ] Notification Center alerts naming the finished project
 - [ ] Localized UI (the menus are currently Korean)
+- [x] Claude Code hooks integration for exact start/stop signals
 - [x] Pixel-art sprite runners
 - [x] Per-session (per-project) runners
 

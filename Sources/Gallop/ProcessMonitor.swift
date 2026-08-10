@@ -109,8 +109,35 @@ final class ProcessMonitor {
         timer = nil
     }
 
+    /// Indexes the current hook reports so each tracked session can find its own.
+    private struct HookIndex {
+        private var byPID: [Int32: HookState] = [:]
+        private var bySessionID: [String: HookState] = [:]
+        private var byCWD: [String: [HookState]] = [:]
+
+        init(_ states: [HookState]) {
+            for state in states {
+                if let pid = state.pid { byPID[pid] = state }
+                bySessionID[state.sessionID] = state
+                if let cwd = state.cwd { byCWD[cwd, default: []].append(state) }
+            }
+        }
+
+        var isEmpty: Bool { bySessionID.isEmpty }
+
+        /// Matches on the strongest identifier available. A working directory
+        /// is only conclusive when a single session reports from it.
+        func lookup(pid: Int32, sessionID: String?, cwd: String?) -> HookState? {
+            if let state = byPID[pid] { return state }
+            if let sessionID, let state = bySessionID[sessionID] { return state }
+            if let cwd, let states = byCWD[cwd], states.count == 1 { return states[0] }
+            return nil
+        }
+    }
+
     private func poll() {
         guard let processes = Self.listProcesses() else { return }
+        let hooks = HookIndex(HookBridge.readAll())
 
         var cpuByPid: [Int32: Double] = [:]
         var children: [Int32: [Int32]] = [:]
@@ -148,11 +175,25 @@ final class ProcessMonitor {
             var needsAttention = false
             let projectPath = workingDirectory(for: pid)
             let sessionID = Self.sessionID(fromArgs: args)
+            let tail = assistant.id == "claude"
+                ? logTail(projectPath: projectPath, sessionID: sessionID) : nil
 
-            // The session log tells us where the turn stands even when the
-            // process idles on an API wait — CPU alone flaps mid-turn.
-            if assistant.id == "claude",
-               let tail = logTail(projectPath: projectPath, sessionID: sessionID) {
+            if let hook = hooks.lookup(pid: pid, sessionID: sessionID, cwd: projectPath),
+               Self.trusts(hook, tail: tail, horizon: turnActivityHorizon) {
+                // Hooks report the session's own state, so they win over
+                // anything inferred from CPU or the transcript.
+                switch hook.phase {
+                case .working:
+                    state = .working
+                case .attention:
+                    state = .idle
+                    needsAttention = true
+                case .idle:
+                    state = .idle
+                }
+            } else if let tail {
+                // No hooks: the transcript still says where the turn stands
+                // even when the process idles on an API wait.
                 switch tail.state {
                 case .awaitingAssistant where tail.age < turnActivityHorizon:
                     state = .working
@@ -213,6 +254,16 @@ final class ProcessMonitor {
                 self.onNeedsAttention?(session)
             }
         }
+    }
+
+    /// Interrupting a turn with Esc fires no Stop hook, so a "working" report
+    /// whose transcript has gone quiet must not pin the runner forever.
+    private static func trusts(
+        _ hook: HookState, tail: (state: LogTailState, age: TimeInterval)?,
+        horizon: TimeInterval
+    ) -> Bool {
+        guard hook.phase == .working, let tail else { return true }
+        return tail.age < horizon
     }
 
     private static func subtreeCPU(
@@ -426,7 +477,7 @@ final class ProcessMonitor {
     // MARK: - Process listing
 
     /// Returns (pid, ppid, cpuPercent, args) for every visible process.
-    private static func listProcesses() -> [(pid: Int32, ppid: Int32, cpu: Double, args: String)]? {
+    static func listProcesses() -> [(pid: Int32, ppid: Int32, cpu: Double, args: String)]? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/ps")
         process.arguments = ["-Axo", "pid=,ppid=,pcpu=,args="]

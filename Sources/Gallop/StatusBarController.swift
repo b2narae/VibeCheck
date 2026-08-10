@@ -140,6 +140,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         overlayItem.state = overlay.enabled ? .on : .off
         menu.addItem(overlayItem)
 
+        let hookItem = NSMenuItem(
+            title: "Claude Code 훅 연동 (정확한 감지)",
+            action: #selector(toggleHooks), keyEquivalent: "")
+        hookItem.target = self
+        hookItem.state = HookBridge.isInstalled ? .on : .off
+        menu.addItem(hookItem)
+
         menu.addItem(soundPickerItem())
 
         menu.addItem(.separator())
@@ -274,6 +281,32 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
     @objc private func toggleOverlay() {
         overlay.enabled.toggle()
+    }
+
+    @objc private func toggleHooks() {
+        let installing = !HookBridge.isInstalled
+        let error = installing ? HookBridge.install() : HookBridge.uninstall()
+
+        let alert = NSAlert()
+        if let error {
+            alert.alertStyle = .warning
+            alert.messageText = "훅 설정을 바꾸지 못했습니다"
+            alert.informativeText = error
+        } else if installing {
+            alert.messageText = "훅 연동을 켰습니다"
+            alert.informativeText = """
+                ~/.claude/settings.json에 Gallop 훅을 추가했습니다. \
+                이미 실행 중인 Claude 세션에는 다음 세션부터 적용됩니다.
+
+                이제 CPU 추정 대신 Claude가 직접 알려주는 신호로 \
+                작업 시작·종료와 입력 요청을 감지합니다.
+                """
+        } else {
+            alert.messageText = "훅 연동을 껐습니다"
+            alert.informativeText =
+                "Gallop이 추가한 훅만 제거했습니다. 다른 훅 설정은 그대로입니다."
+        }
+        alert.runModal()
     }
 
     @objc private func quit() {

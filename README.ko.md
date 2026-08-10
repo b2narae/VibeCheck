@@ -47,9 +47,35 @@ Gallop은 Claude Code · Gemini CLI · Codex CLI 같은 코딩 어시스턴트�
   원하는 소리를 고르거나 끌 수 있습니다 (메뉴 → "알림 사운드", 선택 시 미리듣기).
 - 메뉴바 아이콘을 클릭하면 어시스턴트별 상태와 CPU 사용률을 볼 수 있습니다.
 
+## 훅 연동 (권장)
+
+메뉴에서 **"Claude Code 훅 연동"**을 켜면 Gallop은 더 이상 추측하지 않습니다.
+Claude Code가 턴 시작·종료와 "입력을 기다리는 중"을 직접 알려주므로, CPU 임계값을
+기다릴 필요가 없고 권한 프롬프트가 뜨는 즉시 벽이 세워집니다.
+
+```bash
+/Applications/Gallop.app/Contents/MacOS/Gallop --install-hooks    # 메뉴로도 가능
+/Applications/Gallop.app/Contents/MacOS/Gallop --hooks-status
+/Applications/Gallop.app/Contents/MacOS/Gallop --uninstall-hooks
+```
+
+켜면 `~/.claude/settings.json`에 훅 5개를 **병합**합니다. 기존 설정과 이미 쓰고 있는
+다른 훅은 건드리지 않으며, 최초 1회 `settings.json.gallop-backup` 백업을 남깁니다.
+끄면 Gallop이 추가한 항목만 제거합니다.
+
+등록하는 이벤트는 턴 경계에 해당하는 `SessionStart`·`UserPromptSubmit`·
+`Notification`·`Stop`·`SessionEnd` 뿐입니다. 훅은 동기적으로 실행되어 Claude Code를
+그동안 멈춰 세우기 때문에, 한 턴에 수십 번 발생하는 도구 단위 이벤트는 일부러
+쓰지 않았습니다. 훅 명령은 Gallop 바이너리의 `--hook` 모드로, 이벤트를 읽어
+`~/.gallop/sessions/`에 작은 파일을 쓰고 약 10ms 만에 종료합니다.
+
+훅을 켜지 않아도 아래 휴리스틱으로 그대로 동작합니다. 훅은 추측을 사실로
+바꿔줄 뿐입니다.
+
 ## 감지 원리
 
-별도의 플러그인이나 훅 없이 동작합니다. 1.5초마다 프로세스 목록을 스캔해서
+훅이 설치되지 않았거나 아직 보고하지 않은 세션에는 아래 추정 방식이 쓰입니다.
+1.5초마다 프로세스 목록을 스캔해서
 `claude` / `gemini` / `codex` CLI 프로세스를 PID(세션) 단위로 추적합니다.
 데몬·pty 헬퍼 같은 상주 보조 프로세스는 제외하며, 세션의 작업 디렉토리는
 libproc(`proc_pidinfo`)으로 읽습니다.
@@ -98,9 +124,9 @@ SwiftPM이 정상인 환경이라면 `swift build`도 됩니다.
 ## 로드맵
 
 - [ ] 로그인 시 자동 실행 (SMAppService)
-- [ ] Claude Code hooks 연동으로 정확한 시작/종료 감지 (CPU 휴리스틱 보완)
 - [ ] 완료 시 알림센터 노티피케이션 (어느 프로젝트가 끝났는지 표시)
 - [ ] UI 다국어 지원
+- [x] Claude Code hooks 연동으로 정확한 시작/종료 감지
 - [x] 픽셀아트 스프라이트 러너 (이모지 → 커스텀 아트)
 - [x] 세션별(프로젝트별) 러너 구분
 

@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.overlay.usageWindow = window
             self?.statusBar.usageWindow = window
         }
+        HookBridge.pruneStaleFiles()
         monitor.start()
         usageTracker.start()
     }

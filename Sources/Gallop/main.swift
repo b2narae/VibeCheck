@@ -1,5 +1,27 @@
 import AppKit
 
+if CommandLine.arguments.contains("--hook") {
+    // Invoked by a Claude Code hook: record the event and get out of the way.
+    HookBridge.handleHookInvocation()
+    exit(0)
+}
+
+if CommandLine.arguments.contains("--install-hooks")
+    || CommandLine.arguments.contains("--uninstall-hooks") {
+    let installing = CommandLine.arguments.contains("--install-hooks")
+    if let error = installing ? HookBridge.install() : HookBridge.uninstall() {
+        FileHandle.standardError.write(Data("\(error)\n".utf8))
+        exit(1)
+    }
+    print(installing ? "hooks installed" : "hooks uninstalled")
+    exit(0)
+}
+
+if CommandLine.arguments.contains("--hooks-status") {
+    print(HookBridge.isInstalled ? "installed" : "not installed")
+    exit(0)
+}
+
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--check-log"),
    flagIndex + 1 < CommandLine.arguments.count {
     // Dev utility: classify the tail of a session log.
