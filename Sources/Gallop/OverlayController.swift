@@ -110,7 +110,7 @@ final class OverlayController {
                 assistantID: session.assistant.id,
                 x: content.bounds.width,
                 lane: lane,
-                speed: CGFloat.random(in: 4.5...7.5),
+                speed: CGFloat.random(in: 0.7...1.3),  // leisurely: ~1 min per crossing
                 phase: CGFloat.random(in: 0...(2 * .pi)))
             runners[pid] = runner
             position(runner, session: session)
@@ -139,7 +139,7 @@ final class OverlayController {
                 runner.phase += 0.55
             } else {
                 runner.x -= runner.speed
-                runner.phase += 0.35
+                runner.phase += 0.18  // calm gait to match the slow run
             }
             if runner.x < -runner.label.frame.width {
                 runner.x = content.bounds.width

@@ -7,6 +7,15 @@ enum ActivityState: String {
     case working  // actively doing work (CPU above threshold recently)
 }
 
+/// Shape of the last entry in a session log — tells us where the turn stands
+/// even when the process is quietly waiting on the API.
+enum LogTailState: String {
+    case pendingToolUse     // assistant issued a tool_use, no result yet
+    case awaitingAssistant  // last entry is user/tool_result — model is computing
+    case turnEnded          // assistant finished with a text message
+    case unknown
+}
+
 struct Assistant {
     let id: String
     let displayName: String
@@ -62,6 +71,13 @@ final class ProcessMonitor {
     private let workingCPUThreshold = 8.0
     private let historySize = 4          // samples kept per session (~6s window)
     private let pollInterval: TimeInterval = 1.5
+    /// A mid-turn-shaped log keeps the session "working" while its last write
+    /// is at most this old — covers long API waits without CPU activity, but
+    /// lets interrupted sessions decay back to idle.
+    private let turnActivityHorizon: TimeInterval = 180
+    /// A pending tool_use younger than this is assumed to be a tool still
+    /// running, not a permission prompt waiting for the user.
+    private let pendingAttentionGrace: TimeInterval = 10
 
     var onUpdate: (([AssistantStatus]) -> Void)?
     /// Fired when a session stops working (went idle, or exited mid-run).
@@ -76,7 +92,7 @@ final class ProcessMonitor {
     private var lastAttention: [Int32: Bool] = [:]
     private var lastSessions: [Int32: SessionStatus] = [:]
     private var cwdCache: [Int32: String?] = [:]
-    private var attentionCache: [String: (mtime: Date, pending: Bool)] = [:]
+    private var logTailCache: [String: (mtime: Date, state: LogTailState)] = [:]
 
     func start() {
         let timer = DispatchSource.makeTimerSource(queue: queue)
@@ -125,18 +141,36 @@ final class ProcessMonitor {
             }
             cpuHistory[pid] = history
 
-            let state: ActivityState =
-                (history.max() ?? 0) >= workingCPUThreshold ? .working : .idle
+            let cpuActive = (history.max() ?? 0) >= workingCPUThreshold
+            var state: ActivityState = cpuActive ? .working : .idle
+            var needsAttention = false
             let projectPath = workingDirectory(for: pid)
-            let needsAttention = state == .idle && assistant.id == "claude"
-                && pendingToolUse(projectPath: projectPath,
-                                  sessionID: Self.sessionID(fromArgs: args))
+
+            // The session log tells us where the turn stands even when the
+            // process idles on an API wait — CPU alone flaps mid-turn.
+            if assistant.id == "claude",
+               let tail = logTail(projectPath: projectPath,
+                                  sessionID: Self.sessionID(fromArgs: args)) {
+                switch tail.state {
+                case .awaitingAssistant where tail.age < turnActivityHorizon:
+                    state = .working
+                case .pendingToolUse:
+                    if !cpuActive && tail.age >= pendingAttentionGrace {
+                        state = .idle
+                        needsAttention = true
+                    } else {
+                        state = .working
+                    }
+                default:
+                    break
+                }
+            }
 
             let session = SessionStatus(
                 assistant: assistant, pid: pid, state: state, cpu: cpu,
                 projectPath: projectPath, needsAttention: needsAttention)
 
-            if lastStates[pid] == .working && state == .idle {
+            if lastStates[pid] == .working && state == .idle && !needsAttention {
                 finished.append(session)
             }
             if needsAttention && lastAttention[pid] != true {
@@ -212,13 +246,14 @@ final class ProcessMonitor {
         return String(tokens[tokens.index(after: index)])
     }
 
-    // MARK: - Attention (waiting for user input)
+    // MARK: - Session log tail
 
-    /// True when the session's log ends with an assistant tool_use that has no
-    /// result yet — i.e. Claude asked something (permission, a question) and is
-    /// waiting. Only re-reads the log when its mtime changes.
-    private func pendingToolUse(projectPath: String?, sessionID: String?) -> Bool {
-        guard let projectPath else { return false }
+    /// Locates the session's log and classifies its last entry, plus how long
+    /// ago the log was last written. Only re-reads when the mtime changes.
+    private func logTail(
+        projectPath: String?, sessionID: String?
+    ) -> (state: LogTailState, age: TimeInterval)? {
+        guard let projectPath else { return nil }
         let dir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/projects")
             .appendingPathComponent(Self.encodeProjectPath(projectPath))
@@ -236,14 +271,15 @@ final class ProcessMonitor {
         guard let file,
               let mtime = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?
                   .contentModificationDate
-        else { return false }
+        else { return nil }
 
-        if let cached = attentionCache[file.path], cached.mtime == mtime {
-            return cached.pending
+        let age = Date().timeIntervalSince(mtime)
+        if let cached = logTailCache[file.path], cached.mtime == mtime {
+            return (cached.state, age)
         }
-        let pending = Self.lastEntryIsPendingToolUse(file)
-        attentionCache[file.path] = (mtime, pending)
-        return pending
+        let state = Self.logTailState(file)
+        logTailCache[file.path] = (mtime, state)
+        return (state, age)
     }
 
     /// Claude Code encodes a project cwd as a directory name by replacing
@@ -267,20 +303,38 @@ final class ProcessMonitor {
             }
     }
 
-    /// Reads the tail of a session log and checks whether the last entry is an
-    /// assistant message containing a tool_use (= no result written yet).
-    static func lastEntryIsPendingToolUse(_ url: URL) -> Bool {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+    /// Reads the tail of a session log and classifies the last user/assistant
+    /// entry (skipping snapshots, summaries and other bookkeeping lines).
+    static func logTailState(_ url: URL) -> LogTailState {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return .unknown }
         defer { try? handle.close() }
         let size = (try? handle.seekToEnd()) ?? 0
         let chunk: UInt64 = 262_144
         try? handle.seek(toOffset: size > chunk ? size - chunk : 0)
-        guard let data = try? handle.readToEnd() else { return false }
+        guard let data = try? handle.readToEnd() else { return .unknown }
         let text = String(decoding: data, as: UTF8.self)
-        guard let lastLine = text.split(separator: "\n").last(where: { $0.contains("\"type\"") })
-        else { return false }
-        return lastLine.contains("\"type\":\"assistant\"")
-            && lastLine.contains("\"type\":\"tool_use\"")
+
+        for line in text.split(separator: "\n").reversed() {
+            let assistant = line.range(of: "\"type\":\"assistant\"")
+            let user = line.range(of: "\"type\":\"user\"")
+            switch (assistant, user) {
+            case (nil, nil):
+                continue
+            case (let a?, let u?):
+                // The top-level type comes before anything inside the message.
+                return a.lowerBound < u.lowerBound
+                    ? assistantTail(line) : .awaitingAssistant
+            case (.some, nil):
+                return assistantTail(line)
+            case (nil, .some):
+                return .awaitingAssistant
+            }
+        }
+        return .unknown
+    }
+
+    private static func assistantTail(_ line: Substring) -> LogTailState {
+        line.contains("\"type\":\"tool_use\"") ? .pendingToolUse : .turnEnded
     }
 
     // MARK: - Working directory

@@ -1,10 +1,10 @@
 import AppKit
 
-if let flagIndex = CommandLine.arguments.firstIndex(of: "--check-pending"),
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--check-log"),
    flagIndex + 1 < CommandLine.arguments.count {
-    // Dev utility: does this session log end with a pending tool_use?
+    // Dev utility: classify the tail of a session log.
     let url = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 1])
-    print(ProcessMonitor.lastEntryIsPendingToolUse(url))
+    print(ProcessMonitor.logTailState(url).rawValue)
     exit(0)
 }
 
