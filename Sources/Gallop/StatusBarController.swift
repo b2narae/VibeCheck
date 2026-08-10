@@ -60,7 +60,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         let attention = attentionSessions
         var title: String
         if let urgent = attention.first {
-            title = SessionAnimals.emoji(for: urgent) + "❗"
+            title = "🧱" + SessionAnimals.emoji(for: urgent)
         } else if let first = working.first {
             let dust = animationFrame % 2 == 0 ? "💨" : "\u{2004}\u{2004}"  // keep width stable
             let count = working.count > 1 ? " ×\(working.count)" : ""
@@ -153,7 +153,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         let name = session.projectName ?? "PID \(session.pid)"
         let emoji = SessionAnimals.emoji(for: session)
         if session.needsAttention {
-            return "❗ \(emoji) \(name) — 입력을 기다리는 중"
+            return "🧱\(emoji) \(name) — 입력을 기다리는 중"
         }
         switch session.state {
         case .working:

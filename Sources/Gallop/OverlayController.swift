@@ -1,8 +1,8 @@
 import AppKit
 
 /// A transparent, click-through overlay where one runner per visible session
-/// gallops from right to left. Working sessions run; sessions waiting for
-/// user input bounce in place (or dig down when they're at the top).
+/// gallops from right to left. Working sessions run; a session waiting for
+/// user input halts in front of a brick wall and nudges against it.
 final class OverlayController {
     private struct Runner {
         let label: NSTextField
@@ -10,7 +10,8 @@ final class OverlayController {
         var x: CGFloat
         let lane: Int
         let speed: CGFloat   // points per tick
-        var phase: CGFloat   // for vertical bobbing/jumping
+        var phase: CGFloat   // for bobbing / wall-nudging
+        var wall: NSTextField?
     }
 
     private static let overlayDefaultsKey = "overlayEnabled"
@@ -18,7 +19,6 @@ final class OverlayController {
     private let laneHeight: CGFloat = 55
     private let fontSize: CGFloat = 44
     private let tickInterval: TimeInterval = 1.0 / 30.0
-    private let jumpAmplitude: CGFloat = 45
 
     private var window: NSWindow?
     private var runners: [Int32: Runner] = [:]   // keyed by session pid
@@ -49,7 +49,10 @@ final class OverlayController {
         guard enabled, !sessions.isEmpty else {
             timer?.invalidate()
             timer = nil
-            runners.values.forEach { $0.label.removeFromSuperview() }
+            runners.values.forEach {
+                $0.label.removeFromSuperview()
+                $0.wall?.removeFromSuperview()
+            }
             runners.removeAll()
             window?.orderOut(nil)
             return
@@ -90,6 +93,7 @@ final class OverlayController {
 
         for (pid, runner) in runners where sessions[pid] == nil {
             runner.label.removeFromSuperview()
+            runner.wall?.removeFromSuperview()
             runners.removeValue(forKey: pid)
         }
 
@@ -117,14 +121,33 @@ final class OverlayController {
         }
     }
 
-    /// Re-applies each session's assigned emoji and attention marker.
+    /// Re-applies each session's assigned emoji and adds/removes the wall
+    /// that blocks a runner while it waits for user input.
     func refreshEmojis() {
+        guard let content = window?.contentView else { return }
         for (pid, session) in sessions {
-            guard let runner = runners[pid] else { continue }
-            let text = SessionAnimals.emoji(for: session) + (session.needsAttention ? "❗" : "")
-            if runner.label.stringValue != text {
-                runner.label.stringValue = text
+            guard var runner = runners[pid] else { continue }
+            let emoji = SessionAnimals.emoji(for: session)
+            if runner.label.stringValue != emoji {
+                runner.label.stringValue = emoji
                 runner.label.sizeToFit()
+            }
+
+            if session.needsAttention && runner.wall == nil {
+                let wall = NSTextField(labelWithString: "🧱")
+                wall.font = .systemFont(ofSize: fontSize)
+                wall.backgroundColor = .clear
+                wall.isBezeled = false
+                wall.sizeToFit()
+                content.addSubview(wall)
+                // Keep the wall on screen even if the runner was near the edge.
+                runner.x = max(runner.x, wall.frame.width + 16)
+                runner.wall = wall
+                runners[pid] = runner
+            } else if !session.needsAttention, let wall = runner.wall {
+                wall.removeFromSuperview()
+                runner.wall = nil
+                runners[pid] = runner
             }
         }
     }
@@ -134,15 +157,14 @@ final class OverlayController {
         for (pid, var runner) in runners {
             guard let session = sessions[pid] else { continue }
             if session.needsAttention {
-                // Nearly stationary, bouncing hard to call the user over.
-                runner.x -= runner.speed * 0.2
-                runner.phase += 0.55
+                // Halted at the wall; only the nudge rhythm advances.
+                runner.phase += 0.12
             } else {
                 runner.x -= runner.speed
                 runner.phase += 0.18  // calm gait to match the slow run
-            }
-            if runner.x < -runner.label.frame.width {
-                runner.x = content.bounds.width
+                if runner.x < -runner.label.frame.width {
+                    runner.x = content.bounds.width
+                }
             }
             runners[pid] = runner
             position(runner, session: session)
@@ -151,15 +173,17 @@ final class OverlayController {
 
     private func position(_ runner: Runner, session: SessionStatus) {
         let base = baseY(for: runner)
-        let amplitude: CGFloat = session.needsAttention ? jumpAmplitude : 7
-        var offset = abs(sin(runner.phase)) * amplitude
-
-        // At the top of the screen there is no room to jump up — dig down instead.
-        if let content = window?.contentView,
-           base + amplitude + fontSize > content.bounds.height - 10 {
-            offset = -offset
+        if session.needsAttention {
+            // Stopped, periodically pushing against the wall in front.
+            let nudge = max(0, sin(runner.phase)) * 5
+            runner.label.setFrameOrigin(NSPoint(x: runner.x - nudge, y: base))
+            if let wall = runner.wall {
+                wall.setFrameOrigin(NSPoint(x: runner.x - wall.frame.width - 2, y: base))
+            }
+        } else {
+            let bob = abs(sin(runner.phase)) * 7
+            runner.label.setFrameOrigin(NSPoint(x: runner.x, y: base + bob))
         }
-        runner.label.setFrameOrigin(NSPoint(x: runner.x, y: base + offset))
     }
 
     private func baseY(for runner: Runner) -> CGFloat {
