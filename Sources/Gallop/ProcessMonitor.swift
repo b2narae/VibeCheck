@@ -309,6 +309,8 @@ final class ProcessMonitor {
 
     /// Reads the tail of a session log and classifies the last user/assistant
     /// entry (skipping snapshots, summaries and other bookkeeping lines).
+    /// The candidate line is JSON-parsed rather than string-matched, so text
+    /// that merely mentions these keys cannot be mistaken for structure.
     static func logTailState(_ url: URL) -> LogTailState {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return .unknown }
         defer { try? handle.close() }
@@ -319,27 +321,33 @@ final class ProcessMonitor {
         let text = String(decoding: data, as: UTF8.self)
 
         for line in text.split(separator: "\n").reversed() {
-            let assistant = line.range(of: "\"type\":\"assistant\"")
-            let user = line.range(of: "\"type\":\"user\"")
-            switch (assistant, user) {
-            case (nil, nil):
-                continue
-            case (let a?, let u?):
-                // The top-level type comes before anything inside the message.
-                return a.lowerBound < u.lowerBound
-                    ? assistantTail(line) : .awaitingAssistant
-            case (.some, nil):
-                return assistantTail(line)
-            case (nil, .some):
-                return .awaitingAssistant
+            // Loose prefilter (whitespace-agnostic); the JSON parse decides.
+            guard line.contains("assistant") || line.contains("user"),
+                  let object = try? JSONSerialization.jsonObject(with: Data(line.utf8))
+                      as? [String: Any],
+                  let type = object["type"] as? String
+            else { continue }
+
+            if type == "user" { return .awaitingAssistant }
+            guard type == "assistant" else { continue }
+
+            let message = object["message"] as? [String: Any]
+            let blocks = message?["content"] as? [[String: Any]] ?? []
+            if blocks.contains(where: { $0["type"] as? String == "tool_use" }) {
+                return .pendingToolUse
             }
+            // Text and thinking blocks are written mid-turn too, so their mere
+            // presence means nothing. stop_reason is what says whether the
+            // model is done: "tool_use" means another block is still coming.
+            return Self.endOfTurnReasons.contains(message?["stop_reason"] as? String ?? "")
+                ? .turnEnded : .awaitingAssistant
         }
         return .unknown
     }
 
-    private static func assistantTail(_ line: Substring) -> LogTailState {
-        line.contains("\"type\":\"tool_use\"") ? .pendingToolUse : .turnEnded
-    }
+    private static let endOfTurnReasons: Set<String> = [
+        "end_turn", "stop_sequence", "max_tokens", "refusal",
+    ]
 
     /// The most recent real user prompt in a session log — i.e. what the
     /// session was asked to do. Skips tool results, commands, and meta entries.

@@ -55,11 +55,13 @@ Deciding "is it working?" combines two signals:
 
 1. **CPU**, summed over the session's child processes, so a long build or test
    run counts as work.
-2. **Turn state from the session log** (Claude). If the log's last entry is a user
-   message or a `tool_result`, the model is composing its next response — so the
-   session stays "working" even while the process sits quietly waiting on the
-   API. When a turn truly ends, the last entry is assistant text. Without this,
-   CPU alone flaps during every API wait and runners vanish mid-screen.
+2. **Turn state from the session log** (Claude), read from the last entry's
+   `stop_reason`. A turn is over only on `end_turn` (or `stop_sequence` /
+   `max_tokens` / `refusal`); `tool_use` means another block is still coming, so
+   the session stays "working" even while the process sits quietly waiting on
+   the API. This matters because assistant text and thinking blocks are logged
+   mid-turn as well — judging by content alone marks a working session finished
+   dozens of times per turn, and runners keep dashing off and re-entering.
 
 **Needs-input detection**: an idle session whose log ends with a `tool_use` that
 has no result yet is waiting on you. Logs are only re-read when their mtime
