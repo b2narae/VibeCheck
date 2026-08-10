@@ -1,88 +1,114 @@
 # Gallop 🐎💨
 
-**당신의 코딩 어시스턴트가 일하는 동안, 말이 달립니다.**
+**A little animal runs across your screen while your coding assistant works.**
 
-Gallop은 Claude Code · Gemini CLI · Codex CLI 같은 코딩 어시스턴트의 작업 상태를
-한눈에 보여주는 macOS 메뉴바 앱입니다. 어시스턴트에게 일을 시켜두고 다른 창을 보고
-있어도, 말이 달리고 있으면 아직 일하는 중이고, 말이 멈추면 끝난 것입니다.
+Gallop is a tiny macOS menu bar app that shows, at a glance, whether Claude Code,
+Gemini CLI, or Codex CLI is actually working. Kick off a task, switch to another
+window — as long as the animal is running, your assistant is still busy. When it
+stops, the work is done.
 
-## 동작
+No plugins, no hooks, no configuration. Launch it and it finds your sessions.
 
-| 상태 | 메뉴바 | 의미 |
-|---|---|---|
-| 🐎💨 (갤럽 애니메이션) | 달리는 중 | 어시스턴트가 실제로 작업 수행 중 |
-| 🐴 | 대기 중 | 세션은 열려 있지만 입력을 기다리는 중 |
-| 💤 | 꺼져 있음 | 실행 중인 어시스턴트 없음 |
+[한국어 README](README.ko.md)
 
-- **터미널(세션)마다 다른 동물**: 보통 어시스턴트 터미널을 여러 개 띄우죠. Gallop은
-  세션(터미널)별로 고유한 동물을 배정합니다 — 어떤 동물이 달리는지 보면 어느 터미널이
-  일하는 중인지 알 수 있습니다. 동물은 세션이 살아있는 동안 유지됩니다.
-- **화면 오버레이**: 작업 중인 세션마다 픽셀아트 러너 한 마리가 화면을 가로질러
-  달립니다. 4프레임 걸음걸이(뻗기→지나가기→모으기→지나가기)로 다리를 움직이며
-  실제로 달리는 모습이고, 위아래로 떠다니지 않고 앞으로만 나아갑니다. 클릭은
-  통과되므로 작업을 방해하지 않습니다. (메뉴에서 끌 수 있음)
-- **프로젝트 이름 표시**: 메뉴에서 세션별로 작업 디렉토리 이름과 상태를 보여줍니다.
-  예: "🐢 seoulstation — 달리는 중 (CPU 12%)"
-- **동물 클릭 = 작업 확인**: 달리는 동물에 마우스를 올리면 그 지점만 클릭 가능해지고,
-  클릭하면 말풍선으로 어느 프로젝트에서 **무슨 지시를 수행 중인지**(세션 로그의 최근
-  사용자 프롬프트)를 보여줍니다. 동물 밖 영역은 여전히 클릭이 통과됩니다.
-- **러너 동물 선택**: 메뉴 → "러너 동물"에서 어시스턴트별 기본 동물(14종)을 고를 수
-  있습니다. 첫 세션이 그 동물을 쓰고, 추가 세션은 겹치지 않는 다른 동물을 받습니다.
-  "🎲 랜덤"을 고르면 세션마다 무작위 동물이 배정됩니다.
-- **러너의 높이 = Claude 5시간 윈도우**: Claude의 사용량 한도는 5시간 블록 단위로
-  갱신됩니다. Claude 러너는 블록이 막 시작됐을 때 화면 **맨 위**에서 달리고, 리셋이
-  가까워질수록 점점 **아래로 내려옵니다**. 러너가 바닥에 붙어 달리면 곧 리셋된다는
-  뜻입니다. 메뉴에도 남은 시간과 리셋 시각이 표시됩니다.
-  (로컬 세션 로그의 타임스탬프로 추정하며, ccusage와 같은 방식입니다 — 블록 시작
-  시각을 정시로 내림해 5시간을 더합니다. 서버 기준과 수 분 차이가 날 수 있습니다.)
-- **입력 요청 감지**: Claude가 권한 승인이나 질문(환경변수 값, 키 입력 등)으로 멈춰서
-  당신의 응답을 기다리면, 그 세션의 동물 **앞에 벽(🧱)이 생기고 동물이 제자리에
-  멈춥니다**. 동물은 벽을 밀며 나아가려 하지만 통과하지 못합니다. 응답을 주면 벽이
-  사라지고 다시 달립니다. 메뉴바 아이콘도 🧱로 바뀌고 알림음이 울립니다.
-- **알림 사운드**: 작업 완료와 입력 요청 이벤트마다 macOS 시스템 사운드 14종 중
-  원하는 소리를 고르거나 끌 수 있습니다 (메뉴 → "알림 사운드", 선택 시 미리듣기).
-- 메뉴바 아이콘을 클릭하면 어시스턴트별 상태와 CPU 사용률을 볼 수 있습니다.
+![The 14 runners, each with a 4-frame gait](docs/runners.png)
 
-## 감지 원리
+## What it shows
 
-별도의 플러그인이나 훅 없이 동작합니다. 1.5초마다 프로세스 목록을 스캔해서
-`claude` / `gemini` / `codex` CLI 프로세스를 PID(세션) 단위로 추적합니다.
-데몬·pty 헬퍼 같은 상주 보조 프로세스는 제외하며, 세션의 작업 디렉토리는
-libproc(`proc_pidinfo`)으로 읽습니다.
+**One animal per terminal.** Most people keep several assistant sessions open.
+Gallop tracks each one separately and gives it its own animal, so you can tell
+which terminal is busy just by looking. The animal sticks with that session for
+its lifetime.
 
-"작업 중" 판정은 두 신호를 결합합니다:
+**Runners actually run.** Each animal is a hand-built pixel sprite with a
+four-frame gait — reach, pass, gather, pass — moving forward only, no floating.
 
-1. **CPU** (자식 프로세스 포함 — 긴 빌드·테스트 실행도 잡힘)
-2. **세션 로그의 턴 상태** (Claude): 로그 마지막 항목이 사용자 메시지나
-   `tool_result`면 Claude가 다음 응답을 계산 중이라는 뜻이므로, API 응답을
-   기다리느라 CPU가 조용한 구간에도 "작업 중"을 유지합니다 (로그 최종 수정
-   3분 이내일 때). 턴이 끝나면 마지막 항목이 어시스턴트 텍스트가 되므로 그때
-   대기 상태로 내려갑니다. CPU만 쓰면 API 대기 구간마다 상태가 흔들려서
-   러너가 화면 중간에 사라졌다 다시 나타납니다.
+**Click an animal to see its task.** Hovering a runner makes just that spot
+clickable (everywhere else stays click-through, so it never gets in your way).
+Clicking pops up the project, the current state, and the most recent instruction
+you gave that session.
 
-**입력 요청 감지**: 세션이 유휴 상태인데 해당 세션 로그(`~/.claude/projects/`)의
-마지막 항목이 "결과가 아직 기록되지 않은 tool_use"라면, Claude가 권한 승인이나
-답변을 기다리며 멈춰 있는 것으로 판단합니다. 로그 파일은 mtime이 바뀔 때만 다시
-읽습니다. (한계: 승인 없이 CPU를 거의 쓰지 않는 장시간 도구 실행 — 예: `sleep` —
-은 드물게 오탐될 수 있습니다.)
+**A wall means it needs you.** When Claude stops to ask for permission, an
+environment variable, a key, or an answer, a brick wall appears in front of that
+animal and it halts, nudging against the wall until you respond.
 
-## 실행
+**Height tracks Claude's 5-hour usage window.** Claude's usage limit refreshes in
+5-hour blocks. A Claude runner starts at the top of the screen when a fresh block
+begins and sinks lower as the block is consumed. When it's running along the
+bottom, a reset is near. The menu shows the exact time remaining.
+
+**Sounds you pick.** Choose any of 14 macOS system sounds — or silence —
+separately for "task finished" and "needs input", with a preview when selecting.
+
+The menu bar icon itself summarizes everything: a galloping animal while work is
+happening, 🧱 when a session is blocked on you, 🐴 when sessions are idle, 💤 when
+nothing is running.
+
+## How detection works
+
+Gallop polls the process list every 1.5 seconds and tracks `claude` / `gemini` /
+`codex` processes per PID, skipping resident helpers like daemons and pty hosts.
+Each session's working directory comes from libproc (`proc_pidinfo`), so no
+subprocesses are spawned per poll.
+
+Deciding "is it working?" combines two signals:
+
+1. **CPU**, summed over the session's child processes, so a long build or test
+   run counts as work.
+2. **Turn state from the session log** (Claude). If the log's last entry is a user
+   message or a `tool_result`, the model is composing its next response — so the
+   session stays "working" even while the process sits quietly waiting on the
+   API. When a turn truly ends, the last entry is assistant text. Without this,
+   CPU alone flaps during every API wait and runners vanish mid-screen.
+
+**Needs-input detection**: an idle session whose log ends with a `tool_use` that
+has no result yet is waiting on you. Logs are only re-read when their mtime
+changes. (Known limitation: a long-running tool that uses almost no CPU can
+occasionally read as a permission prompt.)
+
+The 5-hour window is estimated the same way [ccusage](https://github.com/ryoppippi/ccusage)
+does it — the block start is the first activity after the previous block ended,
+floored to the hour, plus five hours. It can differ from the server's own reset
+by a few minutes.
+
+Everything is read locally from your own machine. Gallop makes no network
+requests and sends nothing anywhere.
+
+## Install
+
+Requires macOS 13+ and a Swift toolchain (Xcode Command Line Tools).
 
 ```bash
-# 개발 모드로 바로 실행
-swift run
-
-# 앱 번들 빌드 (build/Gallop.app 생성)
+git clone https://github.com/b2narae/Gallop.git
+cd Gallop
 ./scripts/make-app.sh
 open build/Gallop.app
 ```
 
-요구사항: macOS 13+, Swift 툴체인 (Xcode Command Line Tools).
+`scripts/make-app.sh` builds `build/Gallop.app`, a menu-bar-only bundle (no Dock
+icon). Move it to `/Applications` if you want to keep it around. To run it
+without building a bundle, use `./scripts/build.sh && ./build/Gallop`, or
+`swift build` if SwiftPM works on your setup.
 
-## 로드맵
+Handy flags while developing:
 
-- [ ] 로그인 시 자동 실행 (SMAppService)
-- [ ] Claude Code hooks 연동으로 정확한 시작/종료 감지 (CPU 휴리스틱 보완)
-- [x] 픽셀아트 스프라이트 러너 (이모지 → 커스텀 아트)
-- [x] 세션별(프로젝트별) 러너 구분
-- [ ] 완료 시 알림센터 노티피케이션 (어느 프로젝트가 끝났는지 표시)
+```bash
+./build/Gallop --debug                  # print detected sessions each poll
+./build/Gallop --dump-sprites out.png   # render the sprite contact sheet
+```
+
+## Roadmap
+
+- [ ] Launch at login (SMAppService)
+- [ ] Claude Code hooks integration for exact start/stop signals
+- [ ] Notification Center alerts naming the finished project
+- [ ] Localized UI (the menus are currently Korean)
+- [x] Pixel-art sprite runners
+- [x] Per-session (per-project) runners
+
+Contributions are welcome — new animals are just a palette and a few pixels in
+`Sources/Gallop/Sprites.swift`.
+
+## License
+
+MIT
