@@ -1,4 +1,4 @@
-# Gallop 🐎
+# VibeCheck 🐎
 
 **딸깍 해놓고 딴짓하세요. 동물이 멈추면 끝난 겁니다.**
 
@@ -6,15 +6,15 @@
 확인합니다. 아직 하는 중. 또 옮겼다가, 또 돌아옵니다. 아직도 하는 중. 결국
 "안 봐도 되게 하려고" 시킨 일을 계속 들여다보고 앉아 있습니다.
 
-Gallop은 **코딩 어시스턴트가 실제로 일하는 동안에만** 화면에서 달리는 작은 픽셀
+VibeCheck은 **코딩 어시스턴트가 실제로 일하는 동안에만** 화면에서 달리는 작은 픽셀
 동물을 띄웁니다. 이제 힐끗 보기만 하면 됩니다. 달리고 있으면 아직 하는 중,
 멈췄으면 가서 확인할 때입니다. 이게 전부입니다.
 
 ![러너들](docs/runners.png)
 
 ```bash
-git clone https://github.com/b2narae/Gallop.git && cd Gallop
-./scripts/make-app.sh && cp -R build/Gallop.app /Applications/ && open /Applications/Gallop.app
+git clone https://github.com/b2narae/VibeCheck.git && cd VibeCheck
+./scripts/make-app.sh && cp -R build/VibeCheck.app /Applications/ && open /Applications/VibeCheck.app
 ```
 
 끝입니다. 설정 파일도, API 키도, 로그인도 없습니다. 알아서 세션을 찾아냅니다.
@@ -72,16 +72,16 @@ git clone https://github.com/b2narae/Gallop.git && cd Gallop
 설치 직후에도 별도 설정 없이 알아서 동작합니다. 다만 **정확하게** 쓰고 싶다면
 메뉴에서 **"Claude Code 훅 연동"**을 켜세요.
 
-그러면 Gallop이 추측하는 대신, Claude Code가 턴 시작·종료와 "입력을 기다리는 중"을
+그러면 VibeCheck이 추측하는 대신, Claude Code가 턴 시작·종료와 "입력을 기다리는 중"을
 직접 알려줍니다. 권한 프롬프트가 뜨는 즉시 벽이 세워집니다.
 
 ```bash
-/Applications/Gallop.app/Contents/MacOS/Gallop --install-hooks     # 메뉴로도 가능
-/Applications/Gallop.app/Contents/MacOS/Gallop --uninstall-hooks
+/Applications/VibeCheck.app/Contents/MacOS/VibeCheck --install-hooks     # 메뉴로도 가능
+/Applications/VibeCheck.app/Contents/MacOS/VibeCheck --uninstall-hooks
 ```
 
 `~/.claude/settings.json`에 **병합**만 하며 기존 설정이나 다른 훅은 건드리지
-않습니다. 수정 전에 백업도 남깁니다. 끄면 Gallop이 추가한 항목만 지웁니다.
+않습니다. 수정 전에 백업도 남깁니다. 끄면 VibeCheck이 추가한 항목만 지웁니다.
 
 ---
 
@@ -95,13 +95,13 @@ git clone https://github.com/b2narae/Gallop.git && cd Gallop
 아예 없습니다. 로컬 세션 파일을 읽는 것으로 끝입니다.
 
 **훅을 켜면 Claude가 느려지나요?** 훅은 실행되는 동안 Claude를 멈춰 세우기 때문에,
-Gallop은 도구 단위 이벤트를 쓰지 않고 턴 경계 이벤트만 등록하며 훅 자체가 약
+VibeCheck은 도구 단위 이벤트를 쓰지 않고 턴 경계 이벤트만 등록하며 훅 자체가 약
 10ms 만에 끝납니다.
 
 **Claude Code를 안 쓰는데요.** Gemini CLI, Codex CLI 러너도 동작합니다. 다만
 사용량 높이 표시와 벽은 아직 Claude 전용입니다.
 
-**뭔가 이상하게 동작해요.** `./build/Gallop --debug`를 실행하면 각 세션을 어떻게
+**뭔가 이상하게 동작해요.** `./build/VibeCheck --debug`를 실행하면 각 세션을 어떻게
 판단하고 있는지 폴링마다 출력합니다.
 
 ---
@@ -117,7 +117,7 @@ Gallop은 도구 단위 이벤트를 쓰지 않고 턴 경계 이벤트만 등�
 않습니다.
 
 **훅을 켠 경우**, `SessionStart`·`UserPromptSubmit`·`Notification`·`Stop`·
-`SessionEnd`가 각각 `Gallop --hook`을 실행해 세션 상태를 `~/.gallop/sessions/`에
+`SessionEnd`가 각각 `VibeCheck --hook`을 실행해 세션 상태를 `~/.vibecheck/sessions/`에
 기록합니다. 알림 중에서도 실제로 사용자를 기다리는 종류만 벽을 세우고, 유휴 알림이나
 완료 알림은 무시합니다. Esc로 턴을 중단하면 `Stop` 훅이 발생하지 않으므로, 대화
 기록이 3분간 조용한 "작업 중" 보고는 신뢰하지 않습니다.
@@ -144,13 +144,13 @@ Gallop은 도구 단위 이벤트를 쓰지 않고 턴 경계 이벤트만 등�
 
 정말로 2분이면 되는 PR입니다. 스프라이트는 코드로 그립니다. 6가지 몸체 템플릿 중
 하나를 고르고, 색상과 특징 하나만 정하면 끝입니다. 전부
-[`Sources/Gallop/Sprites.swift`](Sources/Gallop/Sprites.swift) 안에 있습니다.
+[`Sources/VibeCheck/Sprites.swift`](Sources/VibeCheck/Sprites.swift) 안에 있습니다.
 
 ```swift
 "🦔": Species(.small, body: (0.55, 0.42, 0.32), accent: (0.30, 0.24, 0.18), accessory: .spikes),
 ```
 
-`./build/Gallop --dump-sprites out.png`으로 결과를 미리 볼 수 있습니다.
+`./build/VibeCheck --dump-sprites out.png`으로 결과를 미리 볼 수 있습니다.
 요구사항은 macOS 13+와 Xcode Command Line Tools입니다.
 
 [English README](README.md) · MIT License

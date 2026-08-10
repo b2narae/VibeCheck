@@ -1,14 +1,14 @@
 #!/bin/bash
-# Builds Gallop.app (a proper menu-bar-only app bundle) into ./build.
+# Builds VibeCheck.app (a proper menu-bar-only app bundle) into ./build.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ./scripts/build.sh
 
-APP=build/Gallop.app
+APP=build/VibeCheck.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
-cp build/Gallop "$APP/Contents/MacOS/Gallop"
+cp build/VibeCheck "$APP/Contents/MacOS/VibeCheck"
 
 cat > "$APP/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -16,13 +16,13 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>dev.lumx.gallop</string>
+    <string>dev.lumx.vibecheck</string>
     <key>CFBundleName</key>
-    <string>Gallop</string>
+    <string>VibeCheck</string>
     <key>CFBundleDisplayName</key>
-    <string>Gallop</string>
+    <string>VibeCheck</string>
     <key>CFBundleExecutable</key>
-    <string>Gallop</string>
+    <string>VibeCheck</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

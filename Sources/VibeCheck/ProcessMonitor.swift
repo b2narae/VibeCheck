@@ -87,7 +87,7 @@ final class ProcessMonitor {
     /// Fired when a session starts waiting for user input (permission/question).
     var onNeedsAttention: ((SessionStatus) -> Void)?
 
-    private let queue = DispatchQueue(label: "gallop.monitor", qos: .utility)
+    private let queue = DispatchQueue(label: "vibecheck.monitor", qos: .utility)
     private var timer: DispatchSourceTimer?
     private var cpuHistory: [Int32: [Double]] = [:]
     private var lastStates: [Int32: ActivityState] = [:]

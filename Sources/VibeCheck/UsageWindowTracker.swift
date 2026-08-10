@@ -28,7 +28,7 @@ final class UsageWindowTracker {
 
     var onUpdate: ((UsageWindow?) -> Void)?
 
-    private let queue = DispatchQueue(label: "gallop.usage", qos: .utility)
+    private let queue = DispatchQueue(label: "vibecheck.usage", qos: .utility)
     private var timer: DispatchSourceTimer?
 
     func start() {

@@ -17,17 +17,17 @@ struct HookState {
     let updated: Date
 }
 
-/// Bridges Claude Code hooks into Gallop.
+/// Bridges Claude Code hooks into VibeCheck.
 ///
-/// A hook invocation runs `Gallop --hook`, which reads the event JSON on stdin
-/// and records the session's phase as a small file under ~/.gallop/sessions.
+/// A hook invocation runs `VibeCheck --hook`, which reads the event JSON on stdin
+/// and records the session's phase as a small file under ~/.vibecheck/sessions.
 /// The app reads those files each poll and prefers them over the CPU and
 /// transcript heuristics, which can only ever approximate what the hooks state
 /// outright.
 ///
 /// Only turn-boundary events are registered. Hooks block Claude Code while they
 /// run, so per-tool events (which fire dozens of times per turn) are
-/// deliberately avoided — the turn boundary is all Gallop needs.
+/// deliberately avoided — the turn boundary is all VibeCheck needs.
 enum HookBridge {
     static let events = [
         "SessionStart", "UserPromptSubmit", "Notification", "Stop", "SessionEnd",
@@ -41,7 +41,7 @@ enum HookBridge {
 
     static var stateDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".gallop/sessions", isDirectory: true)
+            .appendingPathComponent(".vibecheck/sessions", isDirectory: true)
     }
 
     private static var settingsFile: URL {
@@ -49,7 +49,7 @@ enum HookBridge {
             .appendingPathComponent(".claude/settings.json")
     }
 
-    // MARK: - Hook side (runs as `Gallop --hook`)
+    // MARK: - Hook side (runs as `VibeCheck --hook`)
 
     /// Reads one hook event from stdin and records it. Never fails loudly:
     /// a monitoring hook must not disturb the session that invoked it.
@@ -215,11 +215,11 @@ enum HookBridge {
         guard let settings = loadSettings(),
               let hooks = settings["hooks"] as? [String: Any] else { return false }
         return events.contains { event in
-            entries(in: hooks, event: event).contains(where: isGallopEntry)
+            entries(in: hooks, event: event).contains(where: isVibeCheckEntry)
         }
     }
 
-    /// Adds Gallop's hooks to ~/.claude/settings.json, leaving every other
+    /// Adds VibeCheck's hooks to ~/.claude/settings.json, leaving every other
     /// setting and any existing hooks untouched. Returns an error message on
     /// failure, nil on success.
     static func install() -> String? {
@@ -228,7 +228,7 @@ enum HookBridge {
         var hooks = settings["hooks"] as? [String: Any] ?? [:]
 
         for event in events {
-            var list = entries(in: hooks, event: event).filter { !isGallopEntry($0) }
+            var list = entries(in: hooks, event: event).filter { !isVibeCheckEntry($0) }
             list.append([
                 "hooks": [[
                     "type": "command",
@@ -242,12 +242,12 @@ enum HookBridge {
         return write(settings: settings)
     }
 
-    /// Removes only Gallop's own hook entries.
+    /// Removes only VibeCheck's own hook entries.
     static func uninstall() -> String? {
         guard var settings = loadSettings(),
               var hooks = settings["hooks"] as? [String: Any] else { return nil }
         for event in events {
-            let list = entries(in: hooks, event: event).filter { !isGallopEntry($0) }
+            let list = entries(in: hooks, event: event).filter { !isVibeCheckEntry($0) }
             if list.isEmpty {
                 hooks.removeValue(forKey: event)
             } else {
@@ -272,11 +272,16 @@ enum HookBridge {
         hooks[event] as? [[String: Any]] ?? []
     }
 
-    private static func isGallopEntry(_ entry: [String: Any]) -> Bool {
+    /// "Gallop" was this app's name before 0.2; entries pointing at it are
+    /// still ours, so installing or uninstalling cleans them up rather than
+    /// leaving a hook that runs a binary the user no longer has.
+    private static let ownNames = ["VibeCheck", "Gallop"]
+
+    private static func isVibeCheckEntry(_ entry: [String: Any]) -> Bool {
         guard let commands = entry["hooks"] as? [[String: Any]] else { return false }
         return commands.contains { command in
             let text = command["command"] as? String ?? ""
-            return text.contains("--hook") && text.contains("Gallop")
+            return text.contains("--hook") && ownNames.contains { text.contains($0) }
         }
     }
 
@@ -289,8 +294,8 @@ enum HookBridge {
 
     private static func write(settings: [String: Any]) -> String? {
         let file = settingsFile
-        // Keep a one-time backup before Gallop ever edits the user's settings.
-        let backup = file.appendingPathExtension("gallop-backup")
+        // Keep a one-time backup before VibeCheck ever edits the user's settings.
+        let backup = file.appendingPathExtension("vibecheck-backup")
         if FileManager.default.fileExists(atPath: file.path),
            !FileManager.default.fileExists(atPath: backup.path) {
             try? FileManager.default.copyItem(at: file, to: backup)

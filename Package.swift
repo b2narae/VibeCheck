@@ -2,14 +2,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "Gallop",
+    name: "VibeCheck",
     platforms: [
         .macOS(.v13)
     ],
     targets: [
         .executableTarget(
-            name: "Gallop",
-            path: "Sources/Gallop"
+            name: "VibeCheck",
+            path: "Sources/VibeCheck"
         )
     ]
 )

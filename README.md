@@ -1,4 +1,4 @@
-# Gallop 🐎
+# VibeCheck 🐎
 
 **Fire off a prompt, go do something else. When the animal stops running, your AI is done.**
 
@@ -6,15 +6,15 @@ You know the loop. You type the prompt. You tab away. Ten seconds later you tab
 back — still going. Tab away. Tab back. Still going. You end up babysitting the
 thing you delegated so you wouldn't have to babysit it.
 
-Gallop puts a tiny pixel animal on your screen that runs *only while your coding
+VibeCheck puts a tiny pixel animal on your screen that runs *only while your coding
 assistant is actually working*. Now you just glance. Still running? Still working.
 Stopped? Go look. That's the whole product.
 
 ![The runners](docs/runners.png)
 
 ```bash
-git clone https://github.com/b2narae/Gallop.git && cd Gallop
-./scripts/make-app.sh && cp -R build/Gallop.app /Applications/ && open /Applications/Gallop.app
+git clone https://github.com/b2narae/VibeCheck.git && cd VibeCheck
+./scripts/make-app.sh && cp -R build/VibeCheck.app /Applications/ && open /Applications/VibeCheck.app
 ```
 
 That's it. No config file, no API key, no sign-in. It finds your sessions by
@@ -71,21 +71,21 @@ Yes, the turtle runs at the same speed as the cheetah. Life is unfair.
 
 ## Make it exact (one click)
 
-Out of the box, Gallop works everything out by watching your machine — no setup
+Out of the box, VibeCheck works everything out by watching your machine — no setup
 required. But if you want it to be *precise*, flip on **"Claude Code 훅 연동"** in
 the menu.
 
-That lets Claude Code tell Gallop directly when a turn starts, when it ends, and
-when it's stuck waiting on you — instead of Gallop inferring it. Permission
+That lets Claude Code tell VibeCheck directly when a turn starts, when it ends, and
+when it's stuck waiting on you — instead of VibeCheck inferring it. Permission
 prompts raise the wall the instant they appear.
 
 ```bash
-/Applications/Gallop.app/Contents/MacOS/Gallop --install-hooks     # or use the menu
-/Applications/Gallop.app/Contents/MacOS/Gallop --uninstall-hooks
+/Applications/VibeCheck.app/Contents/MacOS/VibeCheck --install-hooks     # or use the menu
+/Applications/VibeCheck.app/Contents/MacOS/VibeCheck --uninstall-hooks
 ```
 
 It merges into `~/.claude/settings.json` without touching your other settings or
-hooks, and backs the file up first. Turning it off removes only what Gallop
+hooks, and backs the file up first. Turning it off removes only what VibeCheck
 added.
 
 ---
@@ -99,14 +99,14 @@ times a second and draws some pixels.
 **Does it phone home?** No. There is no network code in this app at all. It reads
 your local session files and that's the end of it.
 
-**Does the hook slow down Claude?** Hooks block Claude while they run, so Gallop
+**Does the hook slow down Claude?** Hooks block Claude while they run, so VibeCheck
 registers only turn-boundary events (not per-tool ones) and its hook finishes in
 about 10 ms.
 
 **I don't use Claude Code.** Gemini CLI and Codex CLI runners work too. The
 usage-window height and the wall are Claude-specific for now.
 
-**Something looks wrong.** Run `./build/Gallop --debug` — it prints what it thinks
+**Something looks wrong.** Run `./build/VibeCheck --debug` — it prints what it thinks
 each session is doing, once per poll.
 
 ---
@@ -116,14 +116,14 @@ each session is doing, once per poll.
 <details>
 <summary>For the curious (click to expand)</summary>
 
-Gallop polls the process list every 1.5 seconds and tracks each `claude` /
+VibeCheck polls the process list every 1.5 seconds and tracks each `claude` /
 `gemini` / `codex` process by PID, skipping resident helpers like daemons and pty
 hosts. Working directories come from libproc (`proc_pidinfo`), so no subprocess
 is spawned per poll.
 
 **With hooks installed**, `SessionStart`, `UserPromptSubmit`, `Notification`,
-`Stop` and `SessionEnd` each run `Gallop --hook`, which records that session's
-phase under `~/.gallop/sessions/`. Only genuine "blocked on you" notifications
+`Stop` and `SessionEnd` each run `VibeCheck --hook`, which records that session's
+phase under `~/.vibecheck/sessions/`. Only genuine "blocked on you" notifications
 raise the wall — idle reminders and completion notices don't. Interrupting a turn
 with Esc fires no `Stop` hook, so a "working" report whose transcript has been
 quiet for three minutes is distrusted.
@@ -152,13 +152,13 @@ five hours. It can differ from the server's own reset by a few minutes.
 
 Genuinely a two-minute PR. Sprites are drawn in code — pick one of six body
 templates, give it a palette and a distinguishing feature, and you're done. It's
-all in [`Sources/Gallop/Sprites.swift`](Sources/Gallop/Sprites.swift).
+all in [`Sources/VibeCheck/Sprites.swift`](Sources/VibeCheck/Sprites.swift).
 
 ```swift
 "🦔": Species(.small, body: (0.55, 0.42, 0.32), accent: (0.30, 0.24, 0.18), accessory: .spikes),
 ```
 
-Preview your work with `./build/Gallop --dump-sprites out.png`. Requires macOS 13+
+Preview your work with `./build/VibeCheck --dump-sprites out.png`. Requires macOS 13+
 and the Xcode Command Line Tools.
 
 [한국어 README](README.ko.md) · MIT License

@@ -151,7 +151,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        let quitItem = NSMenuItem(title: "Gallop 종료", action: #selector(quit), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "VibeCheck 종료", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
     }
@@ -295,7 +295,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         } else if installing {
             alert.messageText = "훅 연동을 켰습니다"
             alert.informativeText = """
-                ~/.claude/settings.json에 Gallop 훅을 추가했습니다. \
+                ~/.claude/settings.json에 VibeCheck 훅을 추가했습니다. \
                 이미 실행 중인 Claude 세션에는 다음 세션부터 적용됩니다.
 
                 이제 CPU 추정 대신 Claude가 직접 알려주는 신호로 \
@@ -304,7 +304,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         } else {
             alert.messageText = "훅 연동을 껐습니다"
             alert.informativeText =
-                "Gallop이 추가한 훅만 제거했습니다. 다른 훅 설정은 그대로입니다."
+                "VibeCheck이 추가한 훅만 제거했습니다. 다른 훅 설정은 그대로입니다."
         }
         alert.runModal()
     }

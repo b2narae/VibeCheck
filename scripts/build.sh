@@ -1,5 +1,5 @@
 #!/bin/bash
-# Compiles Gallop into build/Gallop using swiftc directly (no SwiftPM needed —
+# Compiles VibeCheck into build/VibeCheck using swiftc directly (no SwiftPM needed —
 # some CLT installs have a broken SwiftPM ManifestAPI).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -21,7 +21,7 @@ EOF
   EXTRA_FLAGS+=(-vfsoverlay "$PWD/build/overlay.yaml")
 fi
 
-swiftc -O Sources/Gallop/*.swift -o build/Gallop -framework AppKit \
+swiftc -O Sources/VibeCheck/*.swift -o build/VibeCheck -framework AppKit \
   ${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"}
 
-echo "Built build/Gallop"
+echo "Built build/VibeCheck"

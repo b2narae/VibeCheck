@@ -190,7 +190,7 @@ final class OverlayController {
         guard let content = window?.contentView else { return }
         for (pid, var runner) in runners {
             guard let session = sessions[pid] else {
-                // Finished: dash off the left edge at full gallop, then leave.
+                // Finished: dash off the left edge at full vibecheck, then leave.
                 runner.x -= 5
                 runner.tickCount += 1
                 if runner.tickCount % 3 == 0 {
