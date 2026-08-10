@@ -1,7 +1,18 @@
 import AppKit
 
 final class StatusBarController: NSObject, NSMenuDelegate {
-    private static let soundDefaultsKey = "finishSoundEnabled"
+    /// macOS system sounds offered in the picker.
+    private static let systemSounds = [
+        "Basso", "Blow", "Bottle", "Frog", "Funk", "Glass", "Hero",
+        "Morse", "Ping", "Pop", "Purr", "Sosumi", "Submarine", "Tink",
+    ]
+    private static let soundOff = "off"
+
+    /// (defaults key, menu title, default sound) per event.
+    private static let soundEvents: [(key: String, title: String, fallback: String)] = [
+        ("sound.finish", "작업 완료", "Hero"),
+        ("sound.attention", "입력 요청", "Ping"),
+    ]
 
     private let statusItem: NSStatusItem
     private let monitor: ProcessMonitor
@@ -13,9 +24,15 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     /// Claude's current 5-hour usage window (estimated from local logs).
     var usageWindow: UsageWindow?
 
-    private var soundEnabled: Bool {
-        get { UserDefaults.standard.object(forKey: Self.soundDefaultsKey) as? Bool ?? true }
-        set { UserDefaults.standard.set(newValue, forKey: Self.soundDefaultsKey) }
+    private func soundName(forEvent key: String) -> String {
+        let fallback = Self.soundEvents.first { $0.key == key }?.fallback ?? "Hero"
+        return UserDefaults.standard.string(forKey: key) ?? fallback
+    }
+
+    private func play(event key: String) {
+        let name = soundName(forEvent: key)
+        guard name != Self.soundOff else { return }
+        NSSound(named: name)?.play()
     }
 
     private var workingSessions: [SessionStatus] {
@@ -79,13 +96,11 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     private func sessionFinished(_ session: SessionStatus) {
-        guard soundEnabled else { return }
-        NSSound(named: "Hero")?.play()
+        play(event: "sound.finish")
     }
 
     private func sessionNeedsAttention(_ session: SessionStatus) {
-        guard soundEnabled else { return }
-        NSSound(named: "Ping")?.play()
+        play(event: "sound.attention")
     }
 
     // MARK: - Menu
@@ -125,11 +140,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         overlayItem.state = overlay.enabled ? .on : .off
         menu.addItem(overlayItem)
 
-        let soundItem = NSMenuItem(
-            title: "알림 사운드 (완료·입력 요청)", action: #selector(toggleSound), keyEquivalent: "")
-        soundItem.target = self
-        soundItem.state = soundEnabled ? .on : .off
-        menu.addItem(soundItem)
+        menu.addItem(soundPickerItem())
 
         menu.addItem(.separator())
 
@@ -217,12 +228,52 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         return item
     }
 
-    @objc private func toggleOverlay() {
-        overlay.enabled.toggle()
+    private func soundPickerItem() -> NSMenuItem {
+        let root = NSMenuItem(title: "알림 사운드", action: nil, keyEquivalent: "")
+        let rootMenu = NSMenu()
+        for event in Self.soundEvents {
+            let current = soundName(forEvent: event.key)
+            let title = current == Self.soundOff
+                ? "\(event.title) — 끔"
+                : "\(event.title) — \(current)"
+            let eventItem = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            let submenu = NSMenu()
+            for sound in Self.systemSounds {
+                submenu.addItem(soundChoiceItem(
+                    title: sound, eventKey: event.key, value: sound,
+                    isSelected: current == sound))
+            }
+            submenu.addItem(.separator())
+            submenu.addItem(soundChoiceItem(
+                title: "끔", eventKey: event.key, value: Self.soundOff,
+                isSelected: current == Self.soundOff))
+            eventItem.submenu = submenu
+            rootMenu.addItem(eventItem)
+        }
+        root.submenu = rootMenu
+        return root
     }
 
-    @objc private func toggleSound() {
-        soundEnabled.toggle()
+    private func soundChoiceItem(
+        title: String, eventKey: String, value: String, isSelected: Bool
+    ) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: #selector(selectSound(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = [eventKey, value]
+        item.state = isSelected ? .on : .off
+        return item
+    }
+
+    @objc private func selectSound(_ sender: NSMenuItem) {
+        guard let pair = sender.representedObject as? [String], pair.count == 2 else { return }
+        UserDefaults.standard.set(pair[1], forKey: pair[0])
+        if pair[1] != Self.soundOff {
+            NSSound(named: pair[1])?.play()  // preview
+        }
+    }
+
+    @objc private func toggleOverlay() {
+        overlay.enabled.toggle()
     }
 
     @objc private func quit() {
