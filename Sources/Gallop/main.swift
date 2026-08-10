@@ -8,6 +8,42 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--check-log"),
     exit(0)
 }
 
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--dump-sprites"),
+   flagIndex + 1 < CommandLine.arguments.count {
+    // Dev utility: render every animal's 4 gait frames into one contact sheet.
+    let scale: CGFloat = 2
+    let cell = Sprites.size
+    let cols = 4
+    let rows = RunnerSettings.animals.count
+    let pad: CGFloat = 8
+    let sheet = NSImage(size: NSSize(
+        width: (cell.width * scale + pad) * CGFloat(cols) + pad,
+        height: (cell.height * scale + pad) * CGFloat(rows) + pad))
+    sheet.lockFocus()
+    NSColor.white.setFill()
+    NSRect(origin: .zero, size: sheet.size).fill()
+    NSGraphicsContext.current?.imageInterpolation = .none
+    for (row, animal) in RunnerSettings.animals.enumerated() {
+        for (col, frame) in Sprites.frames(for: animal.emoji).enumerated() {
+            let origin = NSPoint(
+                x: pad + CGFloat(col) * (cell.width * scale + pad),
+                y: sheet.size.height - (pad + cell.height * scale
+                    + CGFloat(row) * (cell.height * scale + pad)))
+            frame.draw(
+                in: NSRect(origin: origin, size: NSSize(
+                    width: cell.width * scale, height: cell.height * scale)))
+        }
+    }
+    sheet.unlockFocus()
+    if let tiff = sheet.tiffRepresentation,
+       let rep = NSBitmapImageRep(data: tiff),
+       let png = rep.representation(using: .png, properties: [:]) {
+        try? png.write(to: URL(fileURLWithPath: CommandLine.arguments[flagIndex + 1]))
+        print("wrote sprite sheet")
+    }
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--debug") {
     // Headless mode: print detection results once per poll, for development.
     setvbuf(stdout, nil, _IOLBF, 0)

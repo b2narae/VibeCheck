@@ -207,7 +207,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         else { return }
         RunnerSettings.set(pair[1], for: assistant)
         SessionAnimals.reset(assistantID: assistant.id)
-        overlay.refreshEmojis()
+        overlay.refreshSprites()
         render()
     }
 
