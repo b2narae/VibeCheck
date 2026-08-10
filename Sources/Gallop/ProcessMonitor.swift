@@ -32,6 +32,8 @@ struct SessionStatus {
     let cpu: Double
     /// Full working directory of the session, e.g. "/Users/me/Desktop/code/foo".
     let projectPath: String?
+    /// Session UUID when present in the process arguments.
+    let sessionID: String?
     /// True when the session is stopped waiting for the user: a permission
     /// prompt, a question, an env var/key request, etc.
     let needsAttention: Bool
@@ -145,12 +147,12 @@ final class ProcessMonitor {
             var state: ActivityState = cpuActive ? .working : .idle
             var needsAttention = false
             let projectPath = workingDirectory(for: pid)
+            let sessionID = Self.sessionID(fromArgs: args)
 
             // The session log tells us where the turn stands even when the
             // process idles on an API wait — CPU alone flaps mid-turn.
             if assistant.id == "claude",
-               let tail = logTail(projectPath: projectPath,
-                                  sessionID: Self.sessionID(fromArgs: args)) {
+               let tail = logTail(projectPath: projectPath, sessionID: sessionID) {
                 switch tail.state {
                 case .awaitingAssistant where tail.age < turnActivityHorizon:
                     state = .working
@@ -168,7 +170,8 @@ final class ProcessMonitor {
 
             let session = SessionStatus(
                 assistant: assistant, pid: pid, state: state, cpu: cpu,
-                projectPath: projectPath, needsAttention: needsAttention)
+                projectPath: projectPath, sessionID: sessionID,
+                needsAttention: needsAttention)
 
             if lastStates[pid] == .working && state == .idle && !needsAttention {
                 finished.append(session)
@@ -250,25 +253,26 @@ final class ProcessMonitor {
 
     /// Locates the session's log and classifies its last entry, plus how long
     /// ago the log was last written. Only re-reads when the mtime changes.
-    private func logTail(
-        projectPath: String?, sessionID: String?
-    ) -> (state: LogTailState, age: TimeInterval)? {
+    /// Locates the log file backing a session (by session id when known,
+    /// otherwise the project's most recently written log).
+    static func sessionLogFile(projectPath: String?, sessionID: String?) -> URL? {
         guard let projectPath else { return nil }
         let dir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/projects")
-            .appendingPathComponent(Self.encodeProjectPath(projectPath))
-
-        var file: URL?
+            .appendingPathComponent(encodeProjectPath(projectPath))
         if let sessionID {
             let candidate = dir.appendingPathComponent("\(sessionID).jsonl")
             if FileManager.default.fileExists(atPath: candidate.path) {
-                file = candidate
+                return candidate
             }
         }
-        if file == nil {
-            file = Self.newestJSONL(in: dir)
-        }
-        guard let file,
+        return newestJSONL(in: dir)
+    }
+
+    private func logTail(
+        projectPath: String?, sessionID: String?
+    ) -> (state: LogTailState, age: TimeInterval)? {
+        guard let file = Self.sessionLogFile(projectPath: projectPath, sessionID: sessionID),
               let mtime = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?
                   .contentModificationDate
         else { return nil }
@@ -335,6 +339,58 @@ final class ProcessMonitor {
 
     private static func assistantTail(_ line: Substring) -> LogTailState {
         line.contains("\"type\":\"tool_use\"") ? .pendingToolUse : .turnEnded
+    }
+
+    /// The most recent real user prompt in a session log — i.e. what the
+    /// session was asked to do. Skips tool results, commands, and meta entries.
+    static func lastUserPrompt(projectPath: String?, sessionID: String?) -> String? {
+        guard let file = sessionLogFile(projectPath: projectPath, sessionID: sessionID)
+        else { return nil }
+        return lastUserPrompt(in: file)
+    }
+
+    static func lastUserPrompt(in file: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        let chunk: UInt64 = 1_048_576
+        try? handle.seek(toOffset: size > chunk ? size - chunk : 0)
+        guard let data = try? handle.readToEnd() else { return nil }
+        let text = String(decoding: data, as: UTF8.self)
+
+        for line in text.split(separator: "\n").reversed() {
+            guard line.contains("\"type\":\"user\""),
+                  let object = try? JSONSerialization.jsonObject(with: Data(line.utf8))
+                      as? [String: Any],
+                  object["type"] as? String == "user",
+                  object["isMeta"] as? Bool != true,
+                  let message = object["message"] as? [String: Any]
+            else { continue }
+
+            var prompt: String?
+            if let content = message["content"] as? String {
+                prompt = content
+            } else if let items = message["content"] as? [[String: Any]] {
+                let texts = items.compactMap { item -> String? in
+                    item["type"] as? String == "text" ? item["text"] as? String : nil
+                }
+                if !texts.isEmpty { prompt = texts.joined(separator: " ") }
+            }
+
+            guard var result = prompt?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !result.isEmpty,
+                  !result.hasPrefix("<"),          // command/system-reminder wrappers
+                  !result.hasPrefix("[Request"),   // interruption markers
+                  !result.hasPrefix("Caveat:")
+            else { continue }
+
+            result = result.replacingOccurrences(of: "\n", with: " ")
+            if result.count > 120 {
+                result = String(result.prefix(120)) + "…"
+            }
+            return result
+        }
+        return nil
     }
 
     // MARK: - Working directory

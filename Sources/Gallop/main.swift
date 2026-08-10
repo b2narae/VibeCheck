@@ -8,6 +8,14 @@ if let flagIndex = CommandLine.arguments.firstIndex(of: "--check-log"),
     exit(0)
 }
 
+if let flagIndex = CommandLine.arguments.firstIndex(of: "--check-prompt"),
+   flagIndex + 1 < CommandLine.arguments.count {
+    // Dev utility: extract the last user prompt from a session log.
+    let url = URL(fileURLWithPath: CommandLine.arguments[flagIndex + 1])
+    print(ProcessMonitor.lastUserPrompt(in: url) ?? "(none)")
+    exit(0)
+}
+
 if let flagIndex = CommandLine.arguments.firstIndex(of: "--dump-sprites"),
    flagIndex + 1 < CommandLine.arguments.count {
     // Dev utility: render every animal's 4 gait frames into one contact sheet.
