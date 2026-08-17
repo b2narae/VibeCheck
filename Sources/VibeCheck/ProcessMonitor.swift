@@ -144,14 +144,17 @@ final class ProcessMonitor {
 
         var cpuByPid: [Int32: Double] = [:]
         var children: [Int32: [Int32]] = [:]
+        var parentOf: [Int32: Int32] = [:]
         var matched: [(assistant: Assistant, pid: Int32, args: String)] = []
         for proc in processes {
             cpuByPid[proc.pid] = proc.cpu
             children[proc.ppid, default: []].append(proc.pid)
+            parentOf[proc.pid] = proc.ppid
             if let assistant = Self.match(args: proc.args) {
                 matched.append((assistant, proc.pid, proc.args))
             }
         }
+        matched = Self.rootSessions(matched, parentOf: parentOf)
         let sessionPids = Set(matched.map(\.pid))
 
         var sessionsByAssistant: [String: [SessionStatus]] = [:]
@@ -187,7 +190,12 @@ final class ProcessMonitor {
             let tail = assistant.id == "claude"
                 ? logTail(projectPath: projectPath, sessionID: sessionID) : nil
 
-            if let hook, Self.trusts(hook, tail: tail, horizon: turnActivityHorizon) {
+            if history.count < 2 {
+                // First sighting: hold the pid as idle for one poll, so
+                // one-shot CLI calls that slipped past the filters die
+                // before they can flash a runner on screen.
+                state = .idle
+            } else if let hook, Self.trusts(hook, tail: tail, horizon: turnActivityHorizon) {
                 // Hooks report the session's own state, so they win over
                 // anything inferred from CPU or the transcript.
                 switch hook.phase {
@@ -298,21 +306,56 @@ final class ProcessMonitor {
         return total
     }
 
+    /// A first argument that marks a one-shot invocation (a subcommand like
+    /// `claude auth status` or print mode), not an interactive session.
+    private static let nonSessionArguments: Set<String> = [
+        "auth", "config", "mcp", "doctor", "update", "install", "plugin",
+        "extensions", "setup-token", "migrate-installer", "exec", "login",
+        "logout", "apply", "-p", "--print", "--version", "-v", "--help", "-h",
+    ]
+
     /// Matches a process against known assistants by the basename of its first
-    /// two argv tokens (covers both `claude ...` and `node /path/claude ...`).
+    /// two argv tokens (covers both `claude ...` and `node /path/claude ...`),
+    /// skipping one-shot invocations that are not interactive sessions.
     static func match(args: String) -> Assistant? {
         let lower = args.lowercased()
         for pattern in excludeSubstrings where lower.contains(pattern) {
             return nil
         }
-        let tokens = args.split(separator: " ", omittingEmptySubsequences: true).prefix(2)
-        for token in tokens {
-            let name = URL(fileURLWithPath: String(token)).lastPathComponent.lowercased()
-            for assistant in assistants where assistant.binaryNames.contains(name) {
-                return assistant
+        let tokens = args.split(separator: " ", omittingEmptySubsequences: true)
+        for index in tokens.indices.prefix(2) {
+            let name = URL(fileURLWithPath: String(tokens[index]))
+                .lastPathComponent.lowercased()
+            guard let assistant = assistants.first(where: { $0.binaryNames.contains(name) })
+            else { continue }
+            let next = tokens.index(after: index)
+            if next < tokens.endIndex,
+               nonSessionArguments.contains(tokens[next].lowercased()) {
+                return nil
             }
+            return assistant
         }
         return nil
+    }
+
+    /// Filters out matched processes that descend from another matched one —
+    /// those are a session's own tool calls (an MCP server or a dev script
+    /// shelling out to a CLI), not terminal sessions.
+    static func rootSessions(
+        _ matched: [(assistant: Assistant, pid: Int32, args: String)],
+        parentOf: [Int32: Int32]
+    ) -> [(assistant: Assistant, pid: Int32, args: String)] {
+        let pids = Set(matched.map(\.pid))
+        return matched.filter { entry in
+            var ancestor = parentOf[entry.pid]
+            var hops = 0
+            while let pid = ancestor, pid > 1, hops < 32 {
+                if pids.contains(pid) { return false }
+                ancestor = parentOf[pid]
+                hops += 1
+            }
+            return true
+        }
     }
 
     static func sessionID(fromArgs args: String) -> String? {
