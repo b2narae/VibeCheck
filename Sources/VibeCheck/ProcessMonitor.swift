@@ -178,12 +178,16 @@ final class ProcessMonitor {
             var needsAttention = false
             var attentionMessage: String?
             let projectPath = workingDirectory(for: pid)
-            let sessionID = Self.sessionID(fromArgs: args)
+            let argsSessionID = Self.sessionID(fromArgs: args)
+            let hook = hooks.lookup(pid: pid, sessionID: argsSessionID, cwd: projectPath)
+            // Hooks carry the true session id even when the args have none;
+            // with it, log lookups hit this session's own file instead of the
+            // project's most recently written one.
+            let sessionID = argsSessionID ?? hook?.sessionID
             let tail = assistant.id == "claude"
                 ? logTail(projectPath: projectPath, sessionID: sessionID) : nil
 
-            if let hook = hooks.lookup(pid: pid, sessionID: sessionID, cwd: projectPath),
-               Self.trusts(hook, tail: tail, horizon: turnActivityHorizon) {
+            if let hook, Self.trusts(hook, tail: tail, horizon: turnActivityHorizon) {
                 // Hooks report the session's own state, so they win over
                 // anything inferred from CPU or the transcript.
                 switch hook.phase {
@@ -261,14 +265,27 @@ final class ProcessMonitor {
         }
     }
 
-    /// Interrupting a turn with Esc fires no Stop hook, so a "working" report
-    /// whose transcript has gone quiet must not pin the runner forever.
+    /// Some phase changes fire no hook event, so a report is only good while
+    /// the transcript agrees with it. Interrupting a turn with Esc fires no
+    /// Stop hook: a "working" report whose transcript has gone quiet must not
+    /// pin the runner forever. Answering a permission prompt fires nothing
+    /// either: an "attention" report is stale once the transcript has moved
+    /// past it (a tool result or new assistant entry landed afterwards).
     private static func trusts(
         _ hook: HookState, tail: (state: LogTailState, age: TimeInterval)?,
         horizon: TimeInterval
     ) -> Bool {
-        guard hook.phase == .working, let tail else { return true }
-        return tail.age < horizon
+        guard let tail else { return true }
+        switch hook.phase {
+        case .working:
+            return tail.age < horizon
+        case .attention:
+            // (now - updated) - (now - mtime) = how far the log ran past the
+            // report; the slack absorbs write-vs-hook ordering jitter.
+            return Date().timeIntervalSince(hook.updated) - tail.age <= 2
+        case .idle:
+            return true
+        }
     }
 
     private static func subtreeCPU(
