@@ -26,12 +26,16 @@ final class OverlayController {
         var frameIndex = 0
         var phase: CGFloat = 0   // wall-nudge rhythm
         var wall: NSTextField?
+        var isTombstone = false   // frozen: this Claude window is fully spent
     }
 
     private static let overlayDefaultsKey = "overlayEnabled"
     private let maxLanes = 4
     private let laneHeight: CGFloat = 55
     private let wallFontSize: CGFloat = 44
+    /// Floor for a running Claude runner's opacity — it fades toward this as
+    /// the usage window empties, but never gets hard to see.
+    private let minRunnerAlpha: CGFloat = 0.28
     private let tickInterval: TimeInterval = 1.0 / 30.0
     private let ticksPerGaitFrame = 8
 
@@ -150,7 +154,8 @@ final class OverlayController {
                 lane: lane,
                 speed: CGFloat.random(in: 0.7...1.3))  // leisurely: ~1 min per crossing
             runners[pid] = runner
-            position(runner, session: session)
+            refreshAppearance(pid)
+            position(runners[pid]!, session: session)
         }
     }
 
@@ -206,7 +211,13 @@ final class OverlayController {
                 }
                 continue
             }
-            if session.needsAttention {
+            runners[pid] = runner
+            refreshAppearance(pid)
+            runner = runners[pid]!
+
+            if runner.isTombstone {
+                // Usage window fully spent: stay put as a grave marker.
+            } else if session.needsAttention {
                 // Halted at the wall in a standing pose; only the nudge rhythm runs.
                 runner.phase += 0.12
                 if runner.frameIndex != Sprites.standingFrame {
@@ -326,15 +337,48 @@ final class OverlayController {
 
     private func baseY(for runner: Runner) -> CGFloat {
         // Claude: altitude = how much of the 5-hour window remains.
-        // Fresh window → top of the screen; nearly reset → bottom.
-        if runner.assistantID == "claude", let usage = usageWindow,
-           let content = window?.contentView {
+        // Fresh window → top of the screen; nearly reset or fully spent → bottom.
+        if runner.assistantID == "claude", let content = window?.contentView {
             let top = content.bounds.height - Sprites.size.height - 24
             let bottom: CGFloat = 6
-            let altitude = bottom + (top - bottom) * CGFloat(1 - usage.fraction())
+            let fraction = usageWindow?.fraction() ?? 1
+            let altitude = bottom + (top - bottom) * CGFloat(1 - fraction)
             // Stagger concurrent Claude runners so they don't fully overlap.
             return altitude + CGFloat(runner.lane) * 14
         }
         return 6 + CGFloat(runner.lane) * laneHeight
+    }
+
+    /// A Claude runner whose usage window has fully expired (no fresh
+    /// activity has started a new one yet) is treated as having spent
+    /// everything it had.
+    private func isExhausted(_ runner: Runner) -> Bool {
+        runner.assistantID == "claude" && usageWindow == nil
+    }
+
+    /// Fades a running Claude runner toward `minRunnerAlpha` as its usage
+    /// window empties, or swaps it for the frozen tombstone marker once
+    /// that window is fully spent.
+    private func refreshAppearance(_ pid: Int32) {
+        guard var runner = runners[pid] else { return }
+        if isExhausted(runner) {
+            if !runner.isTombstone {
+                runner.isTombstone = true
+                runner.view.image = Sprites.tombstone
+                runner.view.alphaValue = 1
+            }
+        } else {
+            if runner.isTombstone {
+                runner.isTombstone = false
+                runner.view.image = Sprites.frames(for: runner.emoji)[runner.frameIndex]
+            }
+            if runner.assistantID == "claude", let usage = usageWindow {
+                let remaining = CGFloat(1 - usage.fraction())
+                runner.view.alphaValue = minRunnerAlpha + (1 - minRunnerAlpha) * remaining
+            } else {
+                runner.view.alphaValue = 1
+            }
+        }
+        runners[pid] = runner
     }
 }

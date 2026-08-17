@@ -75,6 +75,10 @@ enum Sprites {
         return images
     }
 
+    /// Static marker shown in place of a runner once its usage window is
+    /// fully spent — a small grave in the same pixel-art grid as the animals.
+    static let tombstone: NSImage = renderTombstone()
+
     // MARK: - Rendering
 
     private static func render(_ spec: Species, frame: Int) -> NSImage {
@@ -239,6 +243,47 @@ enum Sprites {
                 fill(anchor + shift + 1, legTop + legRow, color)
             }
         }
+
+        image.unlockFocus()
+        return image
+    }
+
+    private static func renderTombstone() -> NSImage {
+        let image = NSImage(size: size)
+        image.lockFocus()
+        NSGraphicsContext.current?.imageInterpolation = .none
+
+        func fill(_ x: Int, _ y: Int, _ color: NSColor) {
+            guard (0..<gridW).contains(x), (0..<gridH).contains(y) else { return }
+            color.setFill()
+            NSRect(x: CGFloat(x) * pixelSize,
+                   y: CGFloat(gridH - 1 - y) * pixelSize,
+                   width: pixelSize, height: pixelSize).fill()
+        }
+        func row(_ y: Int, _ xs: ClosedRange<Int>, _ color: NSColor) {
+            for x in xs { fill(x, y, color) }
+        }
+
+        let stone = NSColor(calibratedWhite: 0.62, alpha: 1)
+        let shade = NSColor(calibratedWhite: 0.42, alpha: 1)
+        let outline = NSColor(calibratedWhite: 0.18, alpha: 1)
+        let grass = NSColor(calibratedRed: 0.30, green: 0.48, blue: 0.28, alpha: 1)
+
+        // Rounded-top slab centered on the shared ground row (13).
+        row(4, 8...13, outline)
+        row(5, 7...14, stone)
+        for y in 6...11 { row(y, 6...15, stone) }
+        row(12, 6...15, outline)
+        fill(7, 6, shade); fill(14, 6, shade)
+        for y in 7...11 { fill(6, y, shade); fill(15, y, shade) }
+        // Etched cross.
+        fill(10, 7, outline); fill(11, 7, outline)
+        fill(10, 8, outline); fill(11, 8, outline)
+        fill(10, 9, outline); fill(11, 9, outline)
+        fill(8, 8, outline); fill(9, 8, outline)
+        fill(12, 8, outline); fill(13, 8, outline)
+        // Grass tuft at the base.
+        row(13, 4...17, grass)
 
         image.unlockFocus()
         return image
