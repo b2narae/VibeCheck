@@ -32,16 +32,24 @@ answer by looking, not by clicking through tabs.
 **🧱 A wall means it wants something from you.** When Claude stops to ask for
 permission, or wants an API key, or asks you a question, a brick wall drops in
 front of that animal and it halts, shoving against the wall until you come back.
-No more discovering ten minutes later that it's been politely waiting for a yes.
+And the moment you answer in the terminal, the wall comes down — it tracks the
+session's actual transcript, not just the notification that raised it.
 
-**🖱️ Click an animal, see its job.** Hover one and click — it tells you which
-project it's in and what you actually asked it to do. Handy when three animals
-are running and you've forgotten which is which.
+**🖱️ Click an animal, see where it stands.** Hover one and click — which
+project it's in, what you asked, and the latest thing it said back. If it's
+stopped at the wall, the panel shows the *actual* question it's asking or the
+exact tool call it wants permission for (`Bash — git push …`). The wall itself
+is clickable too.
+
+**🐾 The menu bar is a headcount.** The status item shows one animal per
+running session — blocked ones lead with their wall, like 🧱🐕. Hover a
+session's row in the menu for the same details as clicking its runner.
 
 **📉 Height = how much Claude you have left.** Claude's usage limit refreshes in
 5-hour blocks. A fresh block puts your runner up near the top of the screen, and
-it drifts lower as you burn through the window. Running along the bottom? Wrap it
-up, the reset is coming.
+it drifts lower — and fades — as you burn through the window. When the window is
+fully spent, the runner stops as a tiny tombstone until a fresh block begins.
+Running along the bottom? Wrap it up, the reset is coming.
 
 **🔔 Sounds you choose.** Pick any macOS system sound for "done" and for "needs
 you" — or silence. It previews as you pick.
@@ -117,16 +125,29 @@ each session is doing, once per poll.
 <summary>For the curious (click to expand)</summary>
 
 VibeCheck polls the process list every 1.5 seconds and tracks each `claude` /
-`gemini` / `codex` process by PID, skipping resident helpers like daemons and pty
-hosts. Working directories come from libproc (`proc_pidinfo`), so no subprocess
-is spawned per poll.
+`gemini` / `codex` process by PID. Only interactive terminal sessions count:
+resident helpers (daemons, pty hosts), one-shot invocations (`claude auth
+status`, `claude -p …`), and CLIs spawned from another session's own tools are
+all skipped, and a new pid must survive two polls before it may appear — so a
+dev server shelling out to `gemini auth status` every few seconds doesn't flood
+your screen with phantom runners. Working directories come from libproc
+(`proc_pidinfo`), so no subprocess is spawned per poll.
 
 **With hooks installed**, `SessionStart`, `UserPromptSubmit`, `Notification`,
 `Stop` and `SessionEnd` each run `VibeCheck --hook`, which records that session's
 phase under `~/.vibecheck/sessions/`. Only genuine "blocked on you" notifications
-raise the wall — idle reminders and completion notices don't. Interrupting a turn
-with Esc fires no `Stop` hook, so a "working" report whose transcript has been
-quiet for three minutes is distrusted.
+raise the wall — idle reminders and completion notices don't. Hook reports are
+trusted only while the transcript agrees with them: interrupting a turn with Esc
+fires no `Stop` hook, so a "working" report whose transcript has been quiet for
+three minutes is distrusted, and approving a permission prompt fires no hook
+either, so an "attention" report is dropped as soon as the transcript moves past
+it. Hooks also carry the session's real id, which pins log lookups to the right
+file when several sessions share one project.
+
+The click panel's details come from the transcript too: the most recent
+assistant text is the "latest response", and an unanswered `tool_use` at the end
+of the log is the pending question (for `AskUserQuestion`, the question text
+itself) or the tool call awaiting permission.
 
 **Without hooks**, two signals are combined:
 
