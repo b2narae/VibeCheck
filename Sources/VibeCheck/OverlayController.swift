@@ -12,8 +12,9 @@ private final class OverlayContentView: NSView {
 /// A transparent, click-through overlay where one pixel-art runner per visible
 /// session trots from right to left with an animated 4-frame gait. A session
 /// waiting for user input halts in front of a brick wall and nudges against it.
-/// Hovering over a runner makes just that spot clickable; clicking shows what
-/// task the session is running.
+/// Hovering over a runner (or its wall) makes just that spot clickable;
+/// clicking shows what the session was asked, its latest response, and — when
+/// blocked — the question or permission it is waiting on.
 final class OverlayController {
     private struct Runner {
         let view: NSImageView
@@ -246,24 +247,32 @@ final class OverlayController {
         updateHoverState()
     }
 
-    /// The overlay is click-through except directly over a runner: hovering
-    /// one makes the window interactive so the runner can be clicked.
+    /// True when the point is on the runner or the wall blocking it.
+    private func hits(_ runner: Runner, at point: NSPoint) -> Bool {
+        if runner.view.frame.insetBy(dx: -6, dy: -6).contains(point) { return true }
+        if let wall = runner.wall,
+           wall.frame.insetBy(dx: -6, dy: -6).contains(point) { return true }
+        return false
+    }
+
+    /// The overlay is click-through except directly over a runner or its
+    /// wall: hovering one makes the window interactive so it can be clicked.
     private func updateHoverState() {
         guard let window else { return }
         let point = NSPoint(
             x: NSEvent.mouseLocation.x - window.frame.origin.x,
             y: NSEvent.mouseLocation.y - window.frame.origin.y)
-        let overRunner = runners.contains { sessions[$0.key] != nil
-            && $0.value.view.frame.insetBy(dx: -6, dy: -6).contains(point) }
+        let overRunner = runners.contains {
+            sessions[$0.key] != nil && hits($0.value, at: point)
+        }
         if window.ignoresMouseEvents == overRunner {
             window.ignoresMouseEvents = !overRunner
         }
     }
 
     private func handleClick(at point: NSPoint) {
-        guard let (pid, runner) = runners.first(where: {
-            $0.value.view.frame.insetBy(dx: -6, dy: -6).contains(point)
-        }), let session = sessions[pid] else { return }
+        guard let (pid, runner) = runners.first(where: { hits($0.value, at: point) }),
+              let session = sessions[pid] else { return }
         showInfoPanel(for: session, runner: runner)
     }
 
@@ -284,10 +293,28 @@ final class OverlayController {
         }
         let prompt = ProcessMonitor.lastUserPrompt(
             projectPath: session.projectPath, sessionID: session.sessionID)
+        let detail = session.assistant.id == "claude"
+            ? ProcessMonitor.sessionDetail(
+                projectPath: session.projectPath, sessionID: session.sessionID)
+            : nil
 
         var text = "\(runner.emoji) \(animalName) · \(session.assistant.displayName)"
         text += "\n📁 \(session.projectName ?? "?") — \(stateText)"
         text += "\n💬 \(prompt ?? "최근 지시를 찾지 못함")"
+        if session.needsAttention {
+            // What answer the wall is waiting for.
+            if let question = detail?.pendingQuestion {
+                text += "\n❓ 질문: \(question)"
+            } else if let tool = detail?.pendingTool {
+                text += "\n🛠️ 허가 대기: \(tool)"
+            } else if let message = session.attentionMessage {
+                text += "\n❓ \(message)"
+            } else {
+                text += "\n❓ 입력 대기 — 터미널에서 확인하세요"
+            }
+        } else if let response = detail?.lastResponse {
+            text += "\n🗨️ \(response)"
+        }
 
         let label = NSTextField(wrappingLabelWithString: text)
         label.font = .systemFont(ofSize: 12)

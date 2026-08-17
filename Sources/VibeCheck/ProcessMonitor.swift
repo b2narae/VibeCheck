@@ -37,6 +37,9 @@ struct SessionStatus {
     /// True when the session is stopped waiting for the user: a permission
     /// prompt, a question, an env var/key request, etc.
     let needsAttention: Bool
+    /// Why the session is waiting, when the hook reported it
+    /// (e.g. "Claude needs your permission to use Bash").
+    let attentionMessage: String?
 
     var projectName: String? {
         projectPath.map { URL(fileURLWithPath: $0).lastPathComponent }
@@ -173,6 +176,7 @@ final class ProcessMonitor {
             let cpuActive = (history.max() ?? 0) >= workingCPUThreshold
             var state: ActivityState = cpuActive ? .working : .idle
             var needsAttention = false
+            var attentionMessage: String?
             let projectPath = workingDirectory(for: pid)
             let sessionID = Self.sessionID(fromArgs: args)
             let tail = assistant.id == "claude"
@@ -188,6 +192,7 @@ final class ProcessMonitor {
                 case .attention:
                     state = .idle
                     needsAttention = true
+                    attentionMessage = hook.message
                 case .idle:
                     state = .idle
                 }
@@ -212,7 +217,7 @@ final class ProcessMonitor {
             let session = SessionStatus(
                 assistant: assistant, pid: pid, state: state, cpu: cpu,
                 projectPath: projectPath, sessionID: sessionID,
-                needsAttention: needsAttention)
+                needsAttention: needsAttention, attentionMessage: attentionMessage)
 
             if lastStates[pid] == .working && state == .idle && !needsAttention {
                 finished.append(session)
@@ -450,6 +455,95 @@ final class ProcessMonitor {
             return result
         }
         return nil
+    }
+
+    // MARK: - Session detail (what the session is doing right now)
+
+    /// What a session's log tail says it is doing: the latest response text
+    /// the assistant produced and — when the turn is stopped on an unanswered
+    /// tool_use — what that pending call is asking the user for.
+    struct SessionDetail {
+        /// Most recent assistant text (the answer in progress, or the last one).
+        var lastResponse: String?
+        /// The question text when the pending call is AskUserQuestion.
+        var pendingQuestion: String?
+        /// "ToolName — argument" summary of any other pending tool call.
+        var pendingTool: String?
+    }
+
+    static func sessionDetail(projectPath: String?, sessionID: String?) -> SessionDetail? {
+        guard let file = sessionLogFile(projectPath: projectPath, sessionID: sessionID),
+              let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        let chunk: UInt64 = 1_048_576
+        try? handle.seek(toOffset: size > chunk ? size - chunk : 0)
+        guard let data = try? handle.readToEnd() else { return nil }
+        let text = String(decoding: data, as: UTF8.self)
+
+        var detail = SessionDetail()
+        var isLatestEntry = true
+        for line in text.split(separator: "\n").reversed() {
+            guard line.contains("assistant") || line.contains("user"),
+                  let object = try? JSONSerialization.jsonObject(with: Data(line.utf8))
+                      as? [String: Any],
+                  let type = object["type"] as? String,
+                  type == "assistant" || type == "user"
+            else { continue }
+
+            if type == "user" {
+                // A user/tool_result entry answers everything before it.
+                isLatestEntry = false
+                continue
+            }
+
+            let message = object["message"] as? [String: Any]
+            let blocks = message?["content"] as? [[String: Any]] ?? []
+
+            // A tool_use in the newest entry has no result yet — that is what
+            // the session is stopped on when it waits for permission/an answer.
+            if isLatestEntry {
+                for block in blocks where block["type"] as? String == "tool_use" {
+                    let name = block["name"] as? String ?? "?"
+                    let input = block["input"] as? [String: Any] ?? [:]
+                    if name == "AskUserQuestion",
+                       let questions = input["questions"] as? [[String: Any]],
+                       let question = questions.first?["question"] as? String {
+                        detail.pendingQuestion = clip(question, 160)
+                    } else {
+                        detail.pendingTool = toolSummary(name: name, input: input)
+                    }
+                }
+            }
+            isLatestEntry = false
+
+            if detail.lastResponse == nil {
+                let texts = blocks.compactMap { block -> String? in
+                    block["type"] as? String == "text" ? block["text"] as? String : nil
+                }
+                let joined = texts.joined(separator: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !joined.isEmpty { detail.lastResponse = clip(joined, 200) }
+            }
+            if detail.lastResponse != nil { break }
+        }
+        return detail
+    }
+
+    /// Compact "ToolName — key argument" line for a pending tool call.
+    private static func toolSummary(name: String, input: [String: Any]) -> String {
+        let hintKeys = ["command", "file_path", "description", "pattern", "query", "url", "prompt"]
+        for key in hintKeys {
+            if let value = input[key] as? String, !value.isEmpty {
+                return "\(name) — \(clip(value, 100))"
+            }
+        }
+        return name
+    }
+
+    static func clip(_ text: String, _ limit: Int) -> String {
+        let flat = text.replacingOccurrences(of: "\n", with: " ")
+        return flat.count > limit ? String(flat.prefix(limit)) + "…" : flat
     }
 
     // MARK: - Working directory

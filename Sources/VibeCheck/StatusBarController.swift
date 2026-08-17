@@ -18,8 +18,6 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private let monitor: ProcessMonitor
     private let overlay: OverlayController
     private var statuses: [AssistantStatus] = []
-    private var animationFrame = 0
-    private var animationTimer: Timer?
 
     /// Claude's current 5-hour usage window (estimated from local logs).
     var usageWindow: UsageWindow?
@@ -45,7 +43,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
 
-        statusItem.button?.title = "🐴"
+        statusItem.button?.title = "🐾"
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
@@ -53,12 +51,6 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         monitor.onUpdate = { [weak self] statuses in self?.apply(statuses) }
         monitor.onFinished = { [weak self] session in self?.sessionFinished(session) }
         monitor.onNeedsAttention = { [weak self] session in self?.sessionNeedsAttention(session) }
-
-        animationTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in
-            self?.animationFrame += 1
-            self?.render()
-        }
-        RunLoop.main.add(animationTimer!, forMode: .common)
     }
 
     private var attentionSessions: [SessionStatus] {
@@ -72,23 +64,18 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         render()
     }
 
+    /// One emoji per active session: blocked ones lead with their wall,
+    /// running ones are just the animal itself.
     private func render() {
         let working = workingSessions
         let attention = attentionSessions
-        var title: String
-        if let urgent = attention.first {
-            title = "🧱" + SessionAnimals.emoji(for: urgent)
-        } else if let first = working.first {
-            let dust = animationFrame % 2 == 0 ? "💨" : "\u{2004}\u{2004}"  // keep width stable
-            let count = working.count > 1 ? " ×\(working.count)" : ""
-            title = SessionAnimals.emoji(for: first) + dust + count
-        } else if statuses.contains(where: { $0.state == .idle }) {
-            title = "🐴"
+        let title: String
+        if working.isEmpty && attention.isEmpty {
+            title = statuses.contains(where: { $0.state == .idle }) ? "🐾" : "💤"
         } else {
-            title = "💤"
-        }
-        if !attention.isEmpty && !working.isEmpty {
-            title += " 🏃×\(working.count)"
+            let blocked = attention.map { "🧱" + SessionAnimals.emoji(for: $0) }.joined()
+            let running = working.map { SessionAnimals.emoji(for: $0) }.joined()
+            title = blocked + running
         }
         if statusItem.button?.title != title {
             statusItem.button?.title = title
@@ -126,6 +113,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             for session in status.sessions {
                 let item = disabledItem(sessionLine(session))
                 item.indentationLevel = 1
+                item.submenu = sessionDetailMenu(session)
                 menu.addItem(item)
             }
         }
@@ -165,6 +153,36 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         formatter.dateFormat = "HH:mm"
         let gauge = usage.fraction() < 0.8 ? "⏳" : "🔻"
         return "\(gauge) Claude 5시간 윈도우 — \(remainingText) 남음 (\(formatter.string(from: usage.end)) 리셋)"
+    }
+
+    /// Submenu with what the session is doing right now: the pending question
+    /// when it is blocked, the latest response text, and the instruction it
+    /// was given. Claude only — other assistants keep no readable log.
+    private func sessionDetailMenu(_ session: SessionStatus) -> NSMenu? {
+        guard session.assistant.id == "claude" else { return nil }
+        let menu = NSMenu()
+        let detail = ProcessMonitor.sessionDetail(
+            projectPath: session.projectPath, sessionID: session.sessionID)
+
+        if session.needsAttention {
+            if let question = detail?.pendingQuestion {
+                menu.addItem(disabledItem("❓ 질문: \(ProcessMonitor.clip(question, 80))"))
+            } else if let tool = detail?.pendingTool {
+                menu.addItem(disabledItem("🛠️ 허가 대기: \(ProcessMonitor.clip(tool, 80))"))
+            } else if let message = session.attentionMessage {
+                menu.addItem(disabledItem("❓ \(ProcessMonitor.clip(message, 80))"))
+            } else {
+                menu.addItem(disabledItem("❓ 입력 대기 — 터미널에서 확인하세요"))
+            }
+        }
+        if let response = detail?.lastResponse {
+            menu.addItem(disabledItem("🗨️ 응답: \(ProcessMonitor.clip(response, 80))"))
+        }
+        if let prompt = ProcessMonitor.lastUserPrompt(
+            projectPath: session.projectPath, sessionID: session.sessionID) {
+            menu.addItem(disabledItem("💬 지시: \(ProcessMonitor.clip(prompt, 80))"))
+        }
+        return menu.items.isEmpty ? nil : menu
     }
 
     private func sessionLine(_ session: SessionStatus) -> String {
