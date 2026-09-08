@@ -1,5 +1,7 @@
 import AppKit
+import ServiceManagement
 
+@MainActor
 final class StatusBarController: NSObject, NSMenuDelegate {
     /// macOS system sounds offered in the picker.
     private static let systemSounds = [
@@ -9,17 +11,19 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     private static let soundOff = "off"
 
     /// (defaults key, menu title, default sound) per event.
-    private static let soundEvents: [(key: String, title: String, fallback: String)] = [
-        ("sound.finish", "작업 완료", "Hero"),
-        ("sound.attention", "입력 요청", "Ping"),
-    ]
+    private static var soundEvents: [(key: String, title: String, fallback: String)] {
+        [
+            ("sound.finish", L10n.t("Work finished", "작업 완료"), "Hero"),
+            ("sound.attention", L10n.t("Needs you", "입력 요청"), "Ping"),
+        ]
+    }
 
     private let statusItem: NSStatusItem
     private let monitor: ProcessMonitor
     private let overlay: OverlayController
     private var statuses: [AssistantStatus] = []
 
-    /// Claude's current 5-hour usage window (estimated from local logs).
+    /// Claude's current 5-hour block (estimated from local logs).
     var usageWindow: UsageWindow?
 
     private func soundName(forEvent key: String) -> String {
@@ -37,6 +41,10 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         statuses.flatMap(\.sessions).filter { $0.state == .working }
     }
 
+    private var attentionSessions: [SessionStatus] {
+        statuses.flatMap(\.sessions).filter(\.needsAttention)
+    }
+
     init(monitor: ProcessMonitor, overlay: OverlayController) {
         self.monitor = monitor
         self.overlay = overlay
@@ -49,12 +57,8 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         statusItem.menu = menu
 
         monitor.onUpdate = { [weak self] statuses in self?.apply(statuses) }
-        monitor.onFinished = { [weak self] session in self?.sessionFinished(session) }
-        monitor.onNeedsAttention = { [weak self] session in self?.sessionNeedsAttention(session) }
-    }
-
-    private var attentionSessions: [SessionStatus] {
-        statuses.flatMap(\.sessions).filter(\.needsAttention)
+        monitor.onFinished = { [weak self] _ in self?.play(event: "sound.finish") }
+        monitor.onNeedsAttention = { [weak self] _ in self?.play(event: "sound.attention") }
     }
 
     private func apply(_ statuses: [AssistantStatus]) {
@@ -82,14 +86,6 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         }
     }
 
-    private func sessionFinished(_ session: SessionStatus) {
-        play(event: "sound.finish")
-    }
-
-    private func sessionNeedsAttention(_ session: SessionStatus) {
-        play(event: "sound.attention")
-    }
-
     // MARK: - Menu
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -100,18 +96,21 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             menu.addItem(.separator())
         }
 
-        if statuses.isEmpty {
-            menu.addItem(disabledItem("어시스턴트를 찾는 중…"))
+        if statuses.allSatisfy({ $0.sessions.isEmpty }) {
+            menu.addItem(disabledItem(L10n.t("No sessions running", "실행 중인 세션 없음")))
         }
         for status in statuses {
             if status.sessions.isEmpty {
-                menu.addItem(disabledItem("💤 \(status.assistant.displayName) — 꺼져 있음"))
+                menu.addItem(disabledItem(
+                    "💤 \(status.assistant.displayName) — " + L10n.t("off", "꺼져 있음")))
                 continue
             }
-            menu.addItem(disabledItem(
-                "\(status.assistant.displayName) — 세션 \(status.sessions.count)개"))
+            menu.addItem(disabledItem(L10n.t(
+                "\(status.assistant.displayName) — \(status.sessions.count) session(s)",
+                "\(status.assistant.displayName) — 세션 \(status.sessions.count)개")))
             for session in status.sessions {
-                let item = disabledItem(sessionLine(session))
+                let animal = SessionAnimals.emoji(for: session)
+                let item = disabledItem(SessionSummary.menuLine(session, animal: animal))
                 item.indentationLevel = 1
                 item.submenu = sessionDetailMenu(session)
                 menu.addItem(item)
@@ -122,85 +121,74 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(animalPickerItem())
         menu.addItem(.separator())
 
-        let overlayItem = NSMenuItem(
-            title: "화면에서 러너 달리기", action: #selector(toggleOverlay), keyEquivalent: "")
-        overlayItem.target = self
-        overlayItem.state = overlay.enabled ? .on : .off
-        menu.addItem(overlayItem)
-
-        let hookItem = NSMenuItem(
-            title: "Claude Code 훅 연동 (정확한 감지)",
-            action: #selector(toggleHooks), keyEquivalent: "")
-        hookItem.target = self
-        hookItem.state = HookBridge.isInstalled ? .on : .off
-        menu.addItem(hookItem)
-
+        menu.addItem(toggleItem(
+            title: L10n.t("Run the animals on screen", "화면에서 러너 달리기"),
+            isOn: overlay.enabled, action: #selector(toggleOverlay)))
+        menu.addItem(toggleItem(
+            title: L10n.t("Claude Code hooks (exact detection)",
+                          "Claude Code 훅 연동 (정확한 감지)"),
+            isOn: HookBridge.isInstalled, action: #selector(toggleHooks)))
+        menu.addItem(toggleItem(
+            title: L10n.t("Open at login", "로그인 시 실행"),
+            isOn: LaunchAtLogin.isEnabled, action: #selector(toggleLaunchAtLogin)))
         menu.addItem(soundPickerItem())
 
         menu.addItem(.separator())
-
-        let quitItem = NSMenuItem(title: "VibeCheck 종료", action: #selector(quit), keyEquivalent: "q")
+        let quitItem = NSMenuItem(
+            title: L10n.t("Quit VibeCheck", "VibeCheck 종료"),
+            action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
     }
 
+    /// What the 5-hour block line says. Deliberately phrased as time, because
+    /// time is what the logs can prove; the token count is the one measured
+    /// quantity and is shown as a plain number, never as "x% of your limit".
     private func usageLine(_ usage: UsageWindow) -> String {
-        let remaining = Int(usage.remaining() / 60)  // minutes
-        let hours = remaining / 60
-        let minutes = remaining % 60
-        let remainingText = hours > 0 ? "\(hours)시간 \(minutes)분" : "\(minutes)분"
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
-        let gauge = usage.fraction() < 0.8 ? "⏳" : "🔻"
-        return "\(gauge) Claude 5시간 윈도우 — \(remainingText) 남음 (\(formatter.string(from: usage.end)) 리셋)"
+
+        if usage.isExhausted(), let reset = usage.limitResetsAt {
+            return L10n.t(
+                "🪦 Claude usage limit reached — resets \(formatter.string(from: reset))",
+                "🪦 Claude 사용량 한도 도달 — \(formatter.string(from: reset)) 리셋")
+        }
+
+        let minutes = Int(usage.remaining() / 60)
+        let time = minutes >= 60
+            ? L10n.t("\(minutes / 60)h \(minutes % 60)m", "\(minutes / 60)시간 \(minutes % 60)분")
+            : L10n.t("\(minutes)m", "\(minutes)분")
+        let gauge = usage.elapsedFraction() < 0.8 ? "⏳" : "🔻"
+        return L10n.t(
+            "\(gauge) Claude 5-hour block — \(time) until reset "
+                + "(\(formatter.string(from: usage.end))) · \(tokens(usage.tokens)) tokens",
+            "\(gauge) Claude 5시간 블록 — 리셋까지 \(time) "
+                + "(\(formatter.string(from: usage.end))) · 토큰 \(tokens(usage.tokens))")
     }
 
-    /// Submenu with what the session is doing right now: the pending question
-    /// when it is blocked, the latest response text, and the instruction it
-    /// was given. Claude only — other assistants keep no readable log.
+    private func tokens(_ count: Int) -> String {
+        switch count {
+        case 1_000_000...: return String(format: "%.1fM", Double(count) / 1_000_000)
+        case 1_000...: return String(format: "%.0fK", Double(count) / 1_000)
+        default: return "\(count)"
+        }
+    }
+
+    /// Submenu with what the session is doing right now. Available for any
+    /// assistant whose transcript VibeCheck can read.
     private func sessionDetailMenu(_ session: SessionStatus) -> NSMenu? {
-        guard session.assistant.id == "claude" else { return nil }
+        let lines = SessionSummary.detailLines(session)
+        guard !lines.isEmpty else { return nil }
         let menu = NSMenu()
-        let detail = ProcessMonitor.sessionDetail(
-            projectPath: session.projectPath, sessionID: session.sessionID)
-
-        if session.needsAttention {
-            if let question = detail?.pendingQuestion {
-                menu.addItem(disabledItem("❓ 질문: \(ProcessMonitor.clip(question, 80))"))
-            } else if let tool = detail?.pendingTool {
-                menu.addItem(disabledItem("🛠️ 허가 대기: \(ProcessMonitor.clip(tool, 80))"))
-            } else if let message = session.attentionMessage {
-                menu.addItem(disabledItem("❓ \(ProcessMonitor.clip(message, 80))"))
-            } else {
-                menu.addItem(disabledItem("❓ 입력 대기 — 터미널에서 확인하세요"))
-            }
+        for line in lines {
+            menu.addItem(disabledItem(Transcripts.clip(line, 90)))
         }
-        if let response = detail?.lastResponse {
-            menu.addItem(disabledItem("🗨️ 응답: \(ProcessMonitor.clip(response, 80))"))
-        }
-        if let prompt = ProcessMonitor.lastUserPrompt(
-            projectPath: session.projectPath, sessionID: session.sessionID) {
-            menu.addItem(disabledItem("💬 지시: \(ProcessMonitor.clip(prompt, 80))"))
-        }
-        return menu.items.isEmpty ? nil : menu
-    }
-
-    private func sessionLine(_ session: SessionStatus) -> String {
-        let name = session.projectName ?? "PID \(session.pid)"
-        let emoji = SessionAnimals.emoji(for: session)
-        if session.needsAttention {
-            return "🧱\(emoji) \(name) — 입력을 기다리는 중"
-        }
-        switch session.state {
-        case .working:
-            return "\(emoji) \(name) — 달리는 중 (CPU \(Int(session.cpu))%)"
-        default:
-            return "\(emoji) \(name) — 대기 중"
-        }
+        return menu
     }
 
     private func animalPickerItem() -> NSMenuItem {
-        let root = NSMenuItem(title: "러너 동물", action: nil, keyEquivalent: "")
+        let root = NSMenuItem(
+            title: L10n.t("Runner animal", "러너 동물"), action: nil, keyEquivalent: "")
         let rootMenu = NSMenu()
         for assistant in ProcessMonitor.assistants {
             let stored = RunnerSettings.storedValue(for: assistant)
@@ -211,13 +199,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             let submenu = NSMenu()
             for animal in RunnerSettings.animals {
                 submenu.addItem(pickItem(
-                    title: "\(animal.emoji) \(animal.name)",
-                    assistant: assistant, value: animal.emoji,
-                    isSelected: stored == animal.emoji))
+                    title: "\(animal) \(L10n.animalName(animal))",
+                    assistant: assistant, value: animal,
+                    isSelected: stored == animal))
             }
             submenu.addItem(.separator())
             submenu.addItem(pickItem(
-                title: "🎲 랜덤",
+                title: L10n.t("🎲 Random", "🎲 랜덤"),
                 assistant: assistant, value: RunnerSettings.randomValue,
                 isSelected: stored == RunnerSettings.randomValue))
             assistantItem.submenu = submenu
@@ -253,13 +241,21 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         return item
     }
 
+    private func toggleItem(title: String, isOn: Bool, action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.state = isOn ? .on : .off
+        return item
+    }
+
     private func soundPickerItem() -> NSMenuItem {
-        let root = NSMenuItem(title: "알림 사운드", action: nil, keyEquivalent: "")
+        let root = NSMenuItem(
+            title: L10n.t("Notification sounds", "알림 사운드"), action: nil, keyEquivalent: "")
         let rootMenu = NSMenu()
         for event in Self.soundEvents {
             let current = soundName(forEvent: event.key)
             let title = current == Self.soundOff
-                ? "\(event.title) — 끔"
+                ? "\(event.title) — \(L10n.t("off", "끔"))"
                 : "\(event.title) — \(current)"
             let eventItem = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             let submenu = NSMenu()
@@ -270,7 +266,7 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             }
             submenu.addItem(.separator())
             submenu.addItem(soundChoiceItem(
-                title: "끔", eventKey: event.key, value: Self.soundOff,
+                title: L10n.t("Off", "끔"), eventKey: event.key, value: Self.soundOff,
                 isSelected: current == Self.soundOff))
             eventItem.submenu = submenu
             rootMenu.addItem(eventItem)
@@ -301,6 +297,17 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         overlay.enabled.toggle()
     }
 
+    @objc private func toggleLaunchAtLogin() {
+        if let error = LaunchAtLogin.toggle() {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = L10n.t("Could not change the login item",
+                                       "로그인 항목을 바꾸지 못했습니다")
+            alert.informativeText = error
+            alert.runModal()
+        }
+    }
+
     @objc private func toggleHooks() {
         let installing = !HookBridge.isInstalled
         let error = installing ? HookBridge.install() : HookBridge.uninstall()
@@ -308,26 +315,68 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         let alert = NSAlert()
         if let error {
             alert.alertStyle = .warning
-            alert.messageText = "훅 설정을 바꾸지 못했습니다"
+            alert.messageText = L10n.t("Could not change the hook settings",
+                                       "훅 설정을 바꾸지 못했습니다")
             alert.informativeText = error
         } else if installing {
-            alert.messageText = "훅 연동을 켰습니다"
-            alert.informativeText = """
+            alert.messageText = L10n.t("Hooks are on", "훅 연동을 켰습니다")
+            alert.informativeText = L10n.t(
+                """
+                VibeCheck's hooks were added to ~/.claude/settings.json. \
+                Sessions already running pick them up on their next start.
+
+                Turn start, turn end and permission prompts now come from \
+                Claude Code itself instead of being inferred from CPU.
+                """,
+                """
                 ~/.claude/settings.json에 VibeCheck 훅을 추가했습니다. \
                 이미 실행 중인 Claude 세션에는 다음 세션부터 적용됩니다.
 
                 이제 CPU 추정 대신 Claude가 직접 알려주는 신호로 \
                 작업 시작·종료와 입력 요청을 감지합니다.
-                """
+                """)
         } else {
-            alert.messageText = "훅 연동을 껐습니다"
-            alert.informativeText =
-                "VibeCheck이 추가한 훅만 제거했습니다. 다른 훅 설정은 그대로입니다."
+            alert.messageText = L10n.t("Hooks are off", "훅 연동을 껐습니다")
+            alert.informativeText = L10n.t(
+                "Only the entries VibeCheck added were removed. "
+                    + "Every other hook is untouched.",
+                "VibeCheck이 추가한 훅만 제거했습니다. 다른 훅 설정은 그대로입니다.")
         }
         alert.runModal()
     }
 
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+}
+
+/// The "open at login" toggle, backed by SMAppService (macOS 13+).
+@MainActor
+enum LaunchAtLogin {
+    static var isEnabled: Bool {
+        SMAppService.mainApp.status == .enabled
+    }
+
+    /// Flips the setting; returns an error message when macOS refuses.
+    static func toggle() -> String? {
+        do {
+            if isEnabled {
+                try SMAppService.mainApp.unregister()
+            } else {
+                try SMAppService.mainApp.register()
+            }
+            return nil
+        } catch {
+            // Registering only works for a real .app bundle, so a bare
+            // `build/VibeCheck` binary lands here — say so rather than
+            // failing silently.
+            return L10n.t(
+                "\(error.localizedDescription)\n\n"
+                    + "Open at login needs VibeCheck.app itself — "
+                    + "copy it to /Applications and launch it from there.",
+                "\(error.localizedDescription)\n\n"
+                    + "로그인 시 실행은 VibeCheck.app 번들에서만 됩니다 — "
+                    + "/Applications 로 복사한 뒤 거기서 실행하세요.")
+        }
     }
 }

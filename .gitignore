@@ -1,3 +1,9 @@
 .build/
 build/
 .DS_Store
+
+# Studio collaboration surface. The marketing and site agents read these from
+# the local checkout, not from the public repository, so they stay untracked.
+CLAUDE.md
+marketing/
+.claude/

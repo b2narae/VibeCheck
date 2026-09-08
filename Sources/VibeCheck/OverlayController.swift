@@ -15,6 +15,7 @@ private final class OverlayContentView: NSView {
 /// Hovering over a runner (or its wall) makes just that spot clickable;
 /// clicking shows what the session was asked, its latest response, and — when
 /// blocked — the question or permission it is waiting on.
+@MainActor
 final class OverlayController {
     private struct Runner {
         let view: NSImageView
@@ -27,15 +28,14 @@ final class OverlayController {
         var frameIndex = 0
         var phase: CGFloat = 0   // wall-nudge rhythm
         var wall: NSTextField?
-        var isTombstone = false   // frozen: this Claude window is fully spent
+        var isTombstone = false   // Claude reported the usage limit reached
     }
 
     private static let overlayDefaultsKey = "overlayEnabled"
-    private let maxLanes = 4
     private let laneHeight: CGFloat = 55
     private let wallFontSize: CGFloat = 44
     /// Floor for a running Claude runner's opacity — it fades toward this as
-    /// the usage window empties, but never gets hard to see.
+    /// the block's time runs out, but never gets hard to see.
     private let minRunnerAlpha: CGFloat = 0.28
     private let tickInterval: TimeInterval = 1.0 / 30.0
     private let ticksPerGaitFrame = 8
@@ -48,15 +48,43 @@ final class OverlayController {
     private var infoPanel: NSView?
     private var infoPanelTimer: Timer?
 
-    /// Claude's current 5-hour usage window. Claude runners run high on the
-    /// screen when the window is fresh and sink to the bottom as it nears reset.
+    /// Claude's current 5-hour block. Claude runners run high on the screen
+    /// when the block is fresh and sink as it approaches its reset. This is
+    /// time remaining, not quota remaining — see `UsageWindow`.
     var usageWindow: UsageWindow?
+
+    /// Honour the system "reduce motion" setting: an always-present animation
+    /// crossing the screen is exactly what that preference is asking about.
+    /// The runners stay, and still say everything they say — which session,
+    /// blocked or not, how much of the block is left — they just hold still.
+    private var reduceMotion: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    /// How many rows of runners fit on the current screen arrangement.
+    private var laneCount: Int {
+        guard let height = window?.contentView?.bounds.height else { return 4 }
+        return max(4, min(8, Int(height / laneHeight) - 1))
+    }
 
     var enabled: Bool {
         get { UserDefaults.standard.object(forKey: Self.overlayDefaultsKey) as? Bool ?? true }
         set {
             UserDefaults.standard.set(newValue, forKey: Self.overlayDefaultsKey)
             refresh()
+        }
+    }
+
+    init() {
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.screensChanged() }
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refresh() }
         }
     }
 
@@ -69,16 +97,7 @@ final class OverlayController {
 
     private func refresh() {
         guard enabled else {
-            timer?.invalidate()
-            timer = nil
-            runners.values.forEach {
-                $0.view.removeFromSuperview()
-                $0.wall?.removeFromSuperview()
-            }
-            runners.removeAll()
-            infoPanel?.removeFromSuperview()
-            infoPanel = nil
-            window?.orderOut(nil)
+            teardown()
             return
         }
 
@@ -94,20 +113,41 @@ final class OverlayController {
             return
         }
         if timer == nil {
-            timer = Timer.scheduledTimer(withTimeInterval: tickInterval, repeats: true) { [weak self] _ in
-                self?.tick()
+            timer = Timer.scheduledTimer(withTimeInterval: tickInterval, repeats: true) {
+                [weak self] _ in
+                MainActor.assumeIsolated { self?.tick() }
             }
             RunLoop.main.add(timer!, forMode: .common)
         }
         window?.orderFrontRegardless()
     }
 
+    private func teardown() {
+        timer?.invalidate()
+        timer = nil
+        for runner in runners.values {
+            runner.view.removeFromSuperview()
+            runner.wall?.removeFromSuperview()
+        }
+        runners.removeAll()
+        infoPanel?.removeFromSuperview()
+        infoPanel = nil
+        window?.orderOut(nil)
+    }
+
+    /// The rectangle covering every attached display. Runners used to live on
+    /// `NSScreen.main` only, decided once and never revisited, so a laptop
+    /// docked to an external display lost them.
+    private static func overlayFrame() -> NSRect {
+        NSScreen.screens.reduce(NSRect.zero) { union, screen in
+            union.isEmpty ? screen.visibleFrame : union.union(screen.visibleFrame)
+        }
+    }
+
     private func ensureWindow() {
         if window != nil { return }
-        guard let screen = NSScreen.main else { return }
-
-        // Full visible height: Claude runners' altitude encodes the usage window.
-        let frame = screen.visibleFrame
+        let frame = Self.overlayFrame()
+        guard !frame.isEmpty else { return }
 
         let window = NSWindow(
             contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
@@ -119,9 +159,27 @@ final class OverlayController {
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
 
         let content = OverlayContentView(frame: NSRect(origin: .zero, size: frame.size))
-        content.onClick = { [weak self] point in self?.handleClick(at: point) }
+        content.onClick = { [weak self] point in
+            MainActor.assumeIsolated { self?.handleClick(at: point) }
+        }
         window.contentView = content
         self.window = window
+    }
+
+    /// A display was attached, removed or rearranged: resize to the new union
+    /// and pull any runner that is now outside it back into view.
+    private func screensChanged() {
+        guard let window else { return }
+        let frame = Self.overlayFrame()
+        guard !frame.isEmpty else { return }
+        window.setFrame(frame, display: true)
+        window.contentView?.frame = NSRect(origin: .zero, size: frame.size)
+        let width = frame.width
+        for (pid, var runner) in runners where runner.x > width {
+            runner.x = width
+            runners[pid] = runner
+        }
+        refresh()
     }
 
     private func syncRunners() {
@@ -145,8 +203,8 @@ final class OverlayController {
             content.addSubview(view)
 
             let usedLanes = runners.values.map(\.lane)
-            let lane = (0..<maxLanes).first { !usedLanes.contains($0) }
-                ?? runners.count % maxLanes
+            let lanes = laneCount
+            let lane = (0..<lanes).first { !usedLanes.contains($0) } ?? runners.count % lanes
             let runner = Runner(
                 view: view,
                 assistantID: session.assistant.id,
@@ -194,9 +252,16 @@ final class OverlayController {
 
     private func tick() {
         guard let content = window?.contentView else { return }
+        let still = reduceMotion
         for (pid, var runner) in runners {
             guard let session = sessions[pid] else {
-                // Finished: dash off the left edge at full vibecheck, then leave.
+                // Finished: dash off the left edge, then leave. With motion
+                // reduced there is nothing to watch, so it just goes.
+                if still {
+                    runner.view.removeFromSuperview()
+                    runners.removeValue(forKey: pid)
+                    continue
+                }
                 runner.x -= 5
                 runner.tickCount += 1
                 if runner.tickCount % 3 == 0 {
@@ -217,15 +282,15 @@ final class OverlayController {
             runner = runners[pid]!
 
             if runner.isTombstone {
-                // Usage window fully spent: stay put as a grave marker.
+                // Claude said the limit is reached: stay put as a grave marker.
             } else if session.needsAttention {
                 // Halted at the wall in a standing pose; only the nudge rhythm runs.
-                runner.phase += 0.12
+                if !still { runner.phase += 0.12 }
                 if runner.frameIndex != Sprites.standingFrame {
                     runner.frameIndex = Sprites.standingFrame
                     runner.view.image = Sprites.frames(for: runner.emoji)[Sprites.standingFrame]
                 }
-            } else {
+            } else if !still {
                 runner.x -= runner.speed
                 runner.tickCount += 1
                 if runner.tickCount % ticksPerGaitFrame == 0 {
@@ -281,42 +346,8 @@ final class OverlayController {
         infoPanel?.removeFromSuperview()
         infoPanelTimer?.invalidate()
 
-        let animalName = RunnerSettings.animals
-            .first { $0.emoji == runner.emoji }?.name ?? "러너"
-        let stateText: String
-        if session.needsAttention {
-            stateText = "🧱 입력을 기다리는 중"
-        } else if session.state == .working {
-            stateText = "달리는 중 (CPU \(Int(session.cpu))%)"
-        } else {
-            stateText = "대기 중"
-        }
-        let prompt = ProcessMonitor.lastUserPrompt(
-            projectPath: session.projectPath, sessionID: session.sessionID)
-        let detail = session.assistant.id == "claude"
-            ? ProcessMonitor.sessionDetail(
-                projectPath: session.projectPath, sessionID: session.sessionID)
-            : nil
-
-        var text = "\(runner.emoji) \(animalName) · \(session.assistant.displayName)"
-        text += "\n📁 \(session.projectName ?? "?") — \(stateText)"
-        text += "\n💬 \(prompt ?? "최근 지시를 찾지 못함")"
-        if session.needsAttention {
-            // What answer the wall is waiting for.
-            if let question = detail?.pendingQuestion {
-                text += "\n❓ 질문: \(question)"
-            } else if let tool = detail?.pendingTool {
-                text += "\n🛠️ 허가 대기: \(tool)"
-            } else if let message = session.attentionMessage {
-                text += "\n❓ \(message)"
-            } else {
-                text += "\n❓ 입력 대기 — 터미널에서 확인하세요"
-            }
-        } else if let response = detail?.lastResponse {
-            text += "\n🗨️ \(response)"
-        }
-
-        let label = NSTextField(wrappingLabelWithString: text)
+        let label = NSTextField(wrappingLabelWithString: SessionSummary.panelText(
+            for: session, animal: runner.emoji))
         label.font = .systemFont(ofSize: 12)
         label.textColor = .white
         label.preferredMaxLayoutWidth = 300
@@ -326,12 +357,11 @@ final class OverlayController {
         let panel = NSView(frame: NSRect(
             x: 0, y: 0, width: labelSize.width + 24, height: labelSize.height + 20))
         panel.wantsLayer = true
-        panel.layer?.backgroundColor =
-            NSColor(calibratedWhite: 0.08, alpha: 0.88).cgColor
+        panel.layer?.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 0.88).cgColor
         panel.layer?.cornerRadius = 10
         panel.addSubview(label)
 
-        // Above the runner, clamped to the screen.
+        // Above the runner, clamped to the overlay.
         let x = min(max(runner.x - 20, 8), content.bounds.width - panel.frame.width - 8)
         let y = min(baseY(for: runner) + Sprites.size.height + 10,
                     content.bounds.height - panel.frame.height - 8)
@@ -340,8 +370,10 @@ final class OverlayController {
         infoPanel = panel
 
         let timer = Timer.scheduledTimer(withTimeInterval: 6, repeats: false) { [weak self] _ in
-            self?.infoPanel?.removeFromSuperview()
-            self?.infoPanel = nil
+            MainActor.assumeIsolated {
+                self?.infoPanel?.removeFromSuperview()
+                self?.infoPanel = nil
+            }
         }
         RunLoop.main.add(timer, forMode: .common)
         infoPanelTimer = timer
@@ -363,32 +395,33 @@ final class OverlayController {
     }
 
     private func baseY(for runner: Runner) -> CGFloat {
-        // Claude: altitude = how much of the 5-hour window remains.
-        // Fresh window → top of the screen; nearly reset or fully spent → bottom.
+        // Claude: altitude = how much of the 5-hour block is left to run.
+        // Fresh block → top of the screen; close to reset → bottom.
+        // With no block detected yet we know nothing, so the runner starts
+        // high rather than being drawn as though the time were nearly up.
         if runner.assistantID == "claude", let content = window?.contentView {
             let top = content.bounds.height - Sprites.size.height - 24
             let bottom: CGFloat = 6
-            let fraction = usageWindow?.fraction() ?? 1
-            let altitude = bottom + (top - bottom) * CGFloat(1 - fraction)
+            let elapsed = usageWindow?.elapsedFraction() ?? 0
+            let altitude = bottom + (top - bottom) * CGFloat(1 - elapsed)
             // Stagger concurrent Claude runners so they don't fully overlap.
             return altitude + CGFloat(runner.lane) * 14
         }
         return 6 + CGFloat(runner.lane) * laneHeight
     }
 
-    /// A Claude runner whose usage window has fully expired (no fresh
-    /// activity has started a new one yet) is treated as having spent
-    /// everything it had.
-    private func isExhausted(_ runner: Runner) -> Bool {
-        runner.assistantID == "claude" && usageWindow == nil
-    }
-
-    /// Fades a running Claude runner toward `minRunnerAlpha` as its usage
-    /// window empties, or swaps it for the frozen tombstone marker once
-    /// that window is fully spent.
+    /// Fades a running Claude runner toward `minRunnerAlpha` as its block's
+    /// time runs out, or swaps it for the frozen tombstone once Claude has
+    /// reported that the usage limit is actually reached.
+    ///
+    /// The tombstone used to appear whenever no block was detected, which is
+    /// what happens in the first seconds of a *new* block — the moment you
+    /// have the most left. It now waits for Claude to say so itself.
     private func refreshAppearance(_ pid: Int32) {
         guard var runner = runners[pid] else { return }
-        if isExhausted(runner) {
+        let exhausted = runner.assistantID == "claude"
+            && (usageWindow?.isExhausted() ?? false)
+        if exhausted {
             if !runner.isTombstone {
                 runner.isTombstone = true
                 runner.view.image = Sprites.tombstone
@@ -400,7 +433,7 @@ final class OverlayController {
                 runner.view.image = Sprites.frames(for: runner.emoji)[runner.frameIndex]
             }
             if runner.assistantID == "claude", let usage = usageWindow {
-                let remaining = CGFloat(1 - usage.fraction())
+                let remaining = CGFloat(1 - usage.elapsedFraction())
                 runner.view.alphaValue = minRunnerAlpha + (1 - minRunnerAlpha) * remaining
             } else {
                 runner.view.alphaValue = 1

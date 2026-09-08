@@ -1,22 +1,13 @@
 import Foundation
 import Darwin
 
-enum ActivityState: String {
+enum ActivityState: String, Sendable {
     case absent   // no session process at all
     case idle     // session open, waiting for input
-    case working  // actively doing work (CPU above threshold recently)
+    case working  // actively doing work
 }
 
-/// Shape of the last entry in a session log — tells us where the turn stands
-/// even when the process is quietly waiting on the API.
-enum LogTailState: String {
-    case pendingToolUse     // assistant issued a tool_use, no result yet
-    case awaitingAssistant  // last entry is user/tool_result — model is computing
-    case turnEnded          // assistant finished with a text message
-    case unknown
-}
-
-struct Assistant {
+struct Assistant: Sendable {
     let id: String
     let displayName: String
     let runnerEmoji: String
@@ -25,14 +16,14 @@ struct Assistant {
 }
 
 /// One terminal session of an assistant (one interactive CLI process).
-struct SessionStatus {
+struct SessionStatus: Sendable {
     let assistant: Assistant
     let pid: Int32
     let state: ActivityState  // idle or working
     let cpu: Double
     /// Full working directory of the session, e.g. "/Users/me/Desktop/code/foo".
     let projectPath: String?
-    /// Session UUID when present in the process arguments.
+    /// Session UUID when present in the process arguments or a hook report.
     let sessionID: String?
     /// True when the session is stopped waiting for the user: a permission
     /// prompt, a question, an env var/key request, etc.
@@ -40,13 +31,21 @@ struct SessionStatus {
     /// Why the session is waiting, when the hook reported it
     /// (e.g. "Claude needs your permission to use Bash").
     let attentionMessage: String?
+    /// The transcript backing this session, resolved once per poll so the
+    /// menu and the click panel never have to search the disk themselves.
+    let logFile: URL?
 
     var projectName: String? {
         projectPath.map { URL(fileURLWithPath: $0).lastPathComponent }
     }
+
+    /// The reader that understands this session's transcript, if any.
+    var transcript: (any TranscriptReader.Type)? {
+        logFile == nil ? nil : Transcripts.reader(for: assistant.id)
+    }
 }
 
-struct AssistantStatus {
+struct AssistantStatus: Sendable {
     let assistant: Assistant
     let sessions: [SessionStatus]
 
@@ -56,14 +55,20 @@ struct AssistantStatus {
     }
 }
 
-final class ProcessMonitor {
+/// Watches the process list and each session's transcript, and reports what
+/// every assistant session is doing.
+///
+/// All mutable state is confined to `queue`; the callbacks are snapshotted in
+/// `start()` and only ever invoked on the main actor, which is what makes the
+/// unchecked conformance safe.
+final class ProcessMonitor: @unchecked Sendable {
     static let assistants: [Assistant] = [
         Assistant(id: "claude", displayName: "Claude Code", runnerEmoji: "🐎",
                   binaryNames: ["claude", "claude.exe"]),
         Assistant(id: "gemini", displayName: "Gemini CLI", runnerEmoji: "🦄",
                   binaryNames: ["gemini", "gemini.js"]),
         Assistant(id: "codex", displayName: "Codex CLI", runnerEmoji: "🐫",
-                  binaryNames: ["codex", "codex.exe"]),
+                  binaryNames: ["codex", "codex.exe", "codex.js"]),
     ]
 
     /// Helper/daemon processes that stay resident even without an interactive session.
@@ -80,26 +85,45 @@ final class ProcessMonitor {
     /// is at most this old — covers long API waits without CPU activity, but
     /// lets interrupted sessions decay back to idle.
     private let turnActivityHorizon: TimeInterval = 180
-    /// A pending tool_use younger than this is assumed to be a tool still
+    /// A pending tool call younger than this is assumed to be a tool still
     /// running, not a permission prompt waiting for the user.
     private let pendingAttentionGrace: TimeInterval = 10
 
-    var onUpdate: (([AssistantStatus]) -> Void)?
+    /// Assigned before `start()`; `start()` copies them onto the poll queue.
+    var onUpdate: (@MainActor @Sendable ([AssistantStatus]) -> Void)?
     /// Fired when a session stops working (went idle, or exited mid-run).
-    var onFinished: ((SessionStatus) -> Void)?
+    var onFinished: (@MainActor @Sendable (SessionStatus) -> Void)?
     /// Fired when a session starts waiting for user input (permission/question).
-    var onNeedsAttention: ((SessionStatus) -> Void)?
+    var onNeedsAttention: (@MainActor @Sendable (SessionStatus) -> Void)?
+    /// Fired when a session begins a turn — used to refresh the usage window
+    /// immediately instead of waiting for its own timer.
+    var onSessionActive: (@MainActor @Sendable () -> Void)?
+
+    private struct Handlers: Sendable {
+        let update: (@MainActor @Sendable ([AssistantStatus]) -> Void)?
+        let finished: (@MainActor @Sendable (SessionStatus) -> Void)?
+        let attention: (@MainActor @Sendable (SessionStatus) -> Void)?
+        let active: (@MainActor @Sendable () -> Void)?
+    }
 
     private let queue = DispatchQueue(label: "vibecheck.monitor", qos: .utility)
     private var timer: DispatchSourceTimer?
+    private var handlers = Handlers(update: nil, finished: nil, attention: nil, active: nil)
+
+    // Queue-confined caches.
     private var cpuHistory: [Int32: [Double]] = [:]
+    private var cpuSamples: [Int32: (nanoseconds: UInt64, at: Date)] = [:]
     private var lastStates: [Int32: ActivityState] = [:]
     private var lastAttention: [Int32: Bool] = [:]
     private var lastSessions: [Int32: SessionStatus] = [:]
-    private var cwdCache: [Int32: String?] = [:]
+    private var cwdCache: [Int32: String] = [:]
+    private var logFileCache: [Int32: URL] = [:]
     private var logTailCache: [String: (mtime: Date, state: LogTailState)] = [:]
 
     func start() {
+        handlers = Handlers(
+            update: onUpdate, finished: onFinished,
+            attention: onNeedsAttention, active: onSessionActive)
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now(), repeating: pollInterval)
         timer.setEventHandler { [weak self] in self?.poll() }
@@ -126,32 +150,39 @@ final class ProcessMonitor {
             }
         }
 
-        var isEmpty: Bool { bySessionID.isEmpty }
-
         /// Matches on the strongest identifier available. A working directory
-        /// is only conclusive when a single session reports from it.
-        func lookup(pid: Int32, sessionID: String?, cwd: String?) -> HookState? {
-            if let state = byPID[pid] { return state }
-            if let sessionID, let state = bySessionID[sessionID] { return state }
-            if let cwd, let states = byCWD[cwd], states.count == 1 { return states[0] }
+        /// is only conclusive when a single session of the *same assistant*
+        /// reports from it — otherwise a Claude session would hand its phase
+        /// to a Codex session sharing the directory.
+        func lookup(assistantID: String, pid: Int32, sessionID: String?, cwd: String?)
+            -> HookState? {
+            if let state = byPID[pid], state.assistantID == assistantID { return state }
+            if let sessionID, let state = bySessionID[sessionID],
+               state.assistantID == assistantID { return state }
+            if let cwd {
+                let matching = (byCWD[cwd] ?? []).filter { $0.assistantID == assistantID }
+                if matching.count == 1 { return matching[0] }
+            }
             return nil
         }
     }
 
     private func poll() {
-        guard let processes = Self.listProcesses() else { return }
+        let candidateNames = Set(Self.assistants.flatMap(\.binaryNames))
+        guard let processes = ProcessList.snapshot(argvFor: candidateNames)
+                ?? ProcessList.snapshotViaPS()
+        else { return }
         let hooks = HookIndex(HookBridge.readAll())
+        let now = Date()
 
-        var cpuByPid: [Int32: Double] = [:]
         var children: [Int32: [Int32]] = [:]
         var parentOf: [Int32: Int32] = [:]
         var matched: [(assistant: Assistant, pid: Int32, args: String)] = []
-        for proc in processes {
-            cpuByPid[proc.pid] = proc.cpu
-            children[proc.ppid, default: []].append(proc.pid)
-            parentOf[proc.pid] = proc.ppid
-            if let assistant = Self.match(args: proc.args) {
-                matched.append((assistant, proc.pid, proc.args))
+        for entry in processes {
+            children[entry.ppid, default: []].append(entry.pid)
+            parentOf[entry.pid] = entry.ppid
+            if let assistant = Self.match(args: entry.args) {
+                matched.append((assistant, entry.pid, entry.args))
             }
         }
         matched = Self.rootSessions(matched, parentOf: parentOf)
@@ -161,13 +192,16 @@ final class ProcessMonitor {
         var finished: [SessionStatus] = []
         var attentionStarted: [SessionStatus] = []
         var currentSessions: [Int32: SessionStatus] = [:]
+        var sampledPids = Set<Int32>()
+        var anyTurnStarted = false
 
         for (assistant, pid, args) in matched {
             // Own CPU plus child processes (tools the session is running),
             // stopping at nested sessions so they aren't double-counted.
-            let cpu = Self.subtreeCPU(
-                root: pid, children: children, cpu: cpuByPid,
-                stops: sessionPids.subtracting([pid]))
+            let subtree = Self.subtree(
+                root: pid, children: children, stops: sessionPids.subtracting([pid]))
+            sampledPids.formUnion(subtree)
+            let cpu = cpuPercent(for: subtree, now: now)
 
             var history = cpuHistory[pid] ?? []
             history.append(cpu)
@@ -182,13 +216,17 @@ final class ProcessMonitor {
             var attentionMessage: String?
             let projectPath = workingDirectory(for: pid)
             let argsSessionID = Self.sessionID(fromArgs: args)
-            let hook = hooks.lookup(pid: pid, sessionID: argsSessionID, cwd: projectPath)
+            let hook = hooks.lookup(
+                assistantID: assistant.id, pid: pid,
+                sessionID: argsSessionID, cwd: projectPath)
             // Hooks carry the true session id even when the args have none;
             // with it, log lookups hit this session's own file instead of the
             // project's most recently written one.
             let sessionID = argsSessionID ?? hook?.sessionID
-            let tail = assistant.id == "claude"
-                ? logTail(projectPath: projectPath, sessionID: sessionID) : nil
+            let logFile = logFile(
+                for: pid, assistantID: assistant.id,
+                projectPath: projectPath, sessionID: sessionID)
+            let tail = logFile.flatMap { self.logTail(assistantID: assistant.id, file: $0) }
 
             if history.count < 2 {
                 // First sighting: hold the pid as idle for one poll, so
@@ -212,6 +250,10 @@ final class ProcessMonitor {
                 // No hooks: the transcript still says where the turn stands
                 // even when the process idles on an API wait.
                 switch tail.state {
+                case .awaitingUser:
+                    // Codex says outright that it is blocked on an approval.
+                    state = .idle
+                    needsAttention = true
                 case .awaitingAssistant where tail.age < turnActivityHorizon:
                     state = .working
                 case .pendingToolUse:
@@ -221,6 +263,8 @@ final class ProcessMonitor {
                     } else {
                         state = .working
                     }
+                case .turnEnded:
+                    state = .idle
                 default:
                     break
                 }
@@ -229,10 +273,14 @@ final class ProcessMonitor {
             let session = SessionStatus(
                 assistant: assistant, pid: pid, state: state, cpu: cpu,
                 projectPath: projectPath, sessionID: sessionID,
-                needsAttention: needsAttention, attentionMessage: attentionMessage)
+                needsAttention: needsAttention, attentionMessage: attentionMessage,
+                logFile: logFile)
 
             if lastStates[pid] == .working && state == .idle && !needsAttention {
                 finished.append(session)
+            }
+            if state == .working && lastStates[pid] != .working {
+                anyTurnStarted = true
             }
             if needsAttention && lastAttention[pid] != true {
                 attentionStarted.append(session)
@@ -250,9 +298,11 @@ final class ProcessMonitor {
         }
 
         cpuHistory = cpuHistory.filter { sessionPids.contains($0.key) }
+        cpuSamples = cpuSamples.filter { sampledPids.contains($0.key) }
         lastStates = lastStates.filter { sessionPids.contains($0.key) }
         lastAttention = lastAttention.filter { sessionPids.contains($0.key) }
         cwdCache = cwdCache.filter { sessionPids.contains($0.key) }
+        logFileCache = logFileCache.filter { sessionPids.contains($0.key) }
         lastSessions = currentSessions
 
         let statuses = Self.assistants.map { assistant in
@@ -261,14 +311,19 @@ final class ProcessMonitor {
                 sessions: (sessionsByAssistant[assistant.id] ?? []).sorted { $0.pid < $1.pid })
         }
 
+        let handlers = self.handlers
+        let turnStarted = anyTurnStarted
         DispatchQueue.main.async {
-            SessionAnimals.prune(livePids: sessionPids)
-            self.onUpdate?(statuses)
-            for session in finished {
-                self.onFinished?(session)
-            }
-            for session in attentionStarted {
-                self.onNeedsAttention?(session)
+            MainActor.assumeIsolated {
+                SessionAnimals.prune(livePids: sessionPids)
+                handlers.update?(statuses)
+                for session in finished {
+                    handlers.finished?(session)
+                }
+                for session in attentionStarted {
+                    handlers.attention?(session)
+                }
+                if turnStarted { handlers.active?() }
             }
         }
     }
@@ -279,7 +334,7 @@ final class ProcessMonitor {
     /// pin the runner forever. Answering a permission prompt fires nothing
     /// either: an "attention" report is stale once the transcript has moved
     /// past it (a tool result or new assistant entry landed afterwards).
-    private static func trusts(
+    static func trusts(
         _ hook: HookState, tail: (state: LogTailState, age: TimeInterval)?,
         horizon: TimeInterval
     ) -> Bool {
@@ -296,15 +351,43 @@ final class ProcessMonitor {
         }
     }
 
-    private static func subtreeCPU(
-        root: Int32, children: [Int32: [Int32]], cpu: [Int32: Double], stops: Set<Int32>
-    ) -> Double {
-        var total = cpu[root] ?? 0
-        for child in children[root] ?? [] where !stops.contains(child) {
-            total += subtreeCPU(root: child, children: children, cpu: cpu, stops: stops)
+    // MARK: - CPU
+
+    /// Every pid in a session's process tree, stopping at nested sessions.
+    static func subtree(
+        root: Int32, children: [Int32: [Int32]], stops: Set<Int32>
+    ) -> [Int32] {
+        var result: [Int32] = [root]
+        var index = 0
+        while index < result.count {
+            let pid = result[index]
+            index += 1
+            for child in children[pid] ?? [] where !stops.contains(child) {
+                result.append(child)
+            }
+        }
+        return result
+    }
+
+    /// Utilisation across a process tree since the previous poll. `ps` only
+    /// ever reported a decaying lifetime average; sampling consumed CPU time
+    /// twice gives what the runner actually needs — is it busy *now*.
+    private func cpuPercent(for pids: [Int32], now: Date) -> Double {
+        var total = 0.0
+        for pid in pids {
+            guard let nanoseconds = ProcessList.cpuTime(of: pid) else { continue }
+            if let previous = cpuSamples[pid] {
+                let seconds = now.timeIntervalSince(previous.at)
+                if seconds > 0.05, nanoseconds >= previous.nanoseconds {
+                    total += Double(nanoseconds - previous.nanoseconds) / seconds / 1e7
+                }
+            }
+            cpuSamples[pid] = (nanoseconds, now)
         }
         return total
     }
+
+    // MARK: - Process matching
 
     /// A first argument that marks a one-shot invocation (a subcommand like
     /// `claude auth status` or print mode), not an interactive session.
@@ -340,7 +423,8 @@ final class ProcessMonitor {
 
     /// Filters out matched processes that descend from another matched one —
     /// those are a session's own tool calls (an MCP server or a dev script
-    /// shelling out to a CLI), not terminal sessions.
+    /// shelling out to a CLI), or the npm shim that spawned the real binary,
+    /// not separate terminal sessions.
     static func rootSessions(
         _ matched: [(assistant: Assistant, pid: Int32, args: String)],
         parentOf: [Int32: Int32]
@@ -365,252 +449,51 @@ final class ProcessMonitor {
         return String(tokens[tokens.index(after: index)])
     }
 
-    // MARK: - Session log tail
+    // MARK: - Transcript
 
-    /// Locates the session's log and classifies its last entry, plus how long
-    /// ago the log was last written. Only re-reads when the mtime changes.
-    /// Locates the log file backing a session (by session id when known,
-    /// otherwise the project's most recently written log).
-    static func sessionLogFile(projectPath: String?, sessionID: String?) -> URL? {
-        guard let projectPath else { return nil }
-        let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/projects")
-            .appendingPathComponent(encodeProjectPath(projectPath))
-        if let sessionID {
-            let candidate = dir.appendingPathComponent("\(sessionID).jsonl")
-            if FileManager.default.fileExists(atPath: candidate.path) {
-                return candidate
-            }
+    /// Resolves (and remembers) the transcript file backing a session.
+    /// Failures are never cached: a session's log may not exist yet on the
+    /// first poll, and Codex writes its rollout file a moment after start.
+    private func logFile(
+        for pid: Int32, assistantID: String, projectPath: String?, sessionID: String?
+    ) -> URL? {
+        if let cached = logFileCache[pid],
+           FileManager.default.fileExists(atPath: cached.path) {
+            return cached
         }
-        return newestJSONL(in: dir)
+        guard let reader = Transcripts.reader(for: assistantID),
+              let file = reader.logFile(projectPath: projectPath, sessionID: sessionID)
+        else { return nil }
+        logFileCache[pid] = file
+        return file
     }
 
+    /// Classifies a session's transcript tail, plus how long ago it was
+    /// written. Only re-reads when the mtime changes.
     private func logTail(
-        projectPath: String?, sessionID: String?
+        assistantID: String, file: URL
     ) -> (state: LogTailState, age: TimeInterval)? {
-        guard let file = Self.sessionLogFile(projectPath: projectPath, sessionID: sessionID),
-              let mtime = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?
-                  .contentModificationDate
-        else { return nil }
+        guard let reader = Transcripts.reader(for: assistantID) else { return nil }
+        let mtime = Transcripts.modified(file)
+        guard mtime != .distantPast else { return nil }
 
         let age = Date().timeIntervalSince(mtime)
         if let cached = logTailCache[file.path], cached.mtime == mtime {
             return (cached.state, age)
         }
-        let state = Self.logTailState(file)
+        let state = reader.tailState(file)
         logTailCache[file.path] = (mtime, state)
         return (state, age)
-    }
-
-    /// Claude Code encodes a project cwd as a directory name by replacing
-    /// every non-alphanumeric character with "-".
-    static func encodeProjectPath(_ path: String) -> String {
-        String(path.map { $0.isLetter || $0.isNumber ? $0 : "-" })
-    }
-
-    private static func newestJSONL(in dir: URL) -> URL? {
-        guard let files = try? FileManager.default.contentsOfDirectory(
-            at: dir, includingPropertiesForKeys: [.contentModificationDateKey])
-        else { return nil }
-        return files
-            .filter { $0.pathExtension == "jsonl" }
-            .max { lhs, rhs in
-                let l = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]))?
-                    .contentModificationDate ?? .distantPast
-                let r = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]))?
-                    .contentModificationDate ?? .distantPast
-                return l < r
-            }
-    }
-
-    /// Reads the tail of a session log and classifies the last user/assistant
-    /// entry (skipping snapshots, summaries and other bookkeeping lines).
-    /// The candidate line is JSON-parsed rather than string-matched, so text
-    /// that merely mentions these keys cannot be mistaken for structure.
-    static func logTailState(_ url: URL) -> LogTailState {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return .unknown }
-        defer { try? handle.close() }
-        let size = (try? handle.seekToEnd()) ?? 0
-        let chunk: UInt64 = 262_144
-        try? handle.seek(toOffset: size > chunk ? size - chunk : 0)
-        guard let data = try? handle.readToEnd() else { return .unknown }
-        let text = String(decoding: data, as: UTF8.self)
-
-        for line in text.split(separator: "\n").reversed() {
-            // Loose prefilter (whitespace-agnostic); the JSON parse decides.
-            guard line.contains("assistant") || line.contains("user"),
-                  let object = try? JSONSerialization.jsonObject(with: Data(line.utf8))
-                      as? [String: Any],
-                  let type = object["type"] as? String
-            else { continue }
-
-            if type == "user" { return .awaitingAssistant }
-            guard type == "assistant" else { continue }
-
-            let message = object["message"] as? [String: Any]
-            let blocks = message?["content"] as? [[String: Any]] ?? []
-            if blocks.contains(where: { $0["type"] as? String == "tool_use" }) {
-                return .pendingToolUse
-            }
-            // Text and thinking blocks are written mid-turn too, so their mere
-            // presence means nothing. stop_reason is what says whether the
-            // model is done: "tool_use" means another block is still coming.
-            return Self.endOfTurnReasons.contains(message?["stop_reason"] as? String ?? "")
-                ? .turnEnded : .awaitingAssistant
-        }
-        return .unknown
-    }
-
-    private static let endOfTurnReasons: Set<String> = [
-        "end_turn", "stop_sequence", "max_tokens", "refusal",
-    ]
-
-    /// The most recent real user prompt in a session log — i.e. what the
-    /// session was asked to do. Skips tool results, commands, and meta entries.
-    static func lastUserPrompt(projectPath: String?, sessionID: String?) -> String? {
-        guard let file = sessionLogFile(projectPath: projectPath, sessionID: sessionID)
-        else { return nil }
-        return lastUserPrompt(in: file)
-    }
-
-    static func lastUserPrompt(in file: URL) -> String? {
-        guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
-        defer { try? handle.close() }
-        let size = (try? handle.seekToEnd()) ?? 0
-        let chunk: UInt64 = 1_048_576
-        try? handle.seek(toOffset: size > chunk ? size - chunk : 0)
-        guard let data = try? handle.readToEnd() else { return nil }
-        let text = String(decoding: data, as: UTF8.self)
-
-        for line in text.split(separator: "\n").reversed() {
-            guard line.contains("\"type\":\"user\""),
-                  let object = try? JSONSerialization.jsonObject(with: Data(line.utf8))
-                      as? [String: Any],
-                  object["type"] as? String == "user",
-                  object["isMeta"] as? Bool != true,
-                  let message = object["message"] as? [String: Any]
-            else { continue }
-
-            var prompt: String?
-            if let content = message["content"] as? String {
-                prompt = content
-            } else if let items = message["content"] as? [[String: Any]] {
-                let texts = items.compactMap { item -> String? in
-                    item["type"] as? String == "text" ? item["text"] as? String : nil
-                }
-                if !texts.isEmpty { prompt = texts.joined(separator: " ") }
-            }
-
-            guard var result = prompt?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !result.isEmpty,
-                  !result.hasPrefix("<"),          // command/system-reminder wrappers
-                  !result.hasPrefix("[Request"),   // interruption markers
-                  !result.hasPrefix("Caveat:")
-            else { continue }
-
-            result = result.replacingOccurrences(of: "\n", with: " ")
-            if result.count > 120 {
-                result = String(result.prefix(120)) + "…"
-            }
-            return result
-        }
-        return nil
-    }
-
-    // MARK: - Session detail (what the session is doing right now)
-
-    /// What a session's log tail says it is doing: the latest response text
-    /// the assistant produced and — when the turn is stopped on an unanswered
-    /// tool_use — what that pending call is asking the user for.
-    struct SessionDetail {
-        /// Most recent assistant text (the answer in progress, or the last one).
-        var lastResponse: String?
-        /// The question text when the pending call is AskUserQuestion.
-        var pendingQuestion: String?
-        /// "ToolName — argument" summary of any other pending tool call.
-        var pendingTool: String?
-    }
-
-    static func sessionDetail(projectPath: String?, sessionID: String?) -> SessionDetail? {
-        guard let file = sessionLogFile(projectPath: projectPath, sessionID: sessionID),
-              let handle = try? FileHandle(forReadingFrom: file) else { return nil }
-        defer { try? handle.close() }
-        let size = (try? handle.seekToEnd()) ?? 0
-        let chunk: UInt64 = 1_048_576
-        try? handle.seek(toOffset: size > chunk ? size - chunk : 0)
-        guard let data = try? handle.readToEnd() else { return nil }
-        let text = String(decoding: data, as: UTF8.self)
-
-        var detail = SessionDetail()
-        var isLatestEntry = true
-        for line in text.split(separator: "\n").reversed() {
-            guard line.contains("assistant") || line.contains("user"),
-                  let object = try? JSONSerialization.jsonObject(with: Data(line.utf8))
-                      as? [String: Any],
-                  let type = object["type"] as? String,
-                  type == "assistant" || type == "user"
-            else { continue }
-
-            if type == "user" {
-                // A user/tool_result entry answers everything before it.
-                isLatestEntry = false
-                continue
-            }
-
-            let message = object["message"] as? [String: Any]
-            let blocks = message?["content"] as? [[String: Any]] ?? []
-
-            // A tool_use in the newest entry has no result yet — that is what
-            // the session is stopped on when it waits for permission/an answer.
-            if isLatestEntry {
-                for block in blocks where block["type"] as? String == "tool_use" {
-                    let name = block["name"] as? String ?? "?"
-                    let input = block["input"] as? [String: Any] ?? [:]
-                    if name == "AskUserQuestion",
-                       let questions = input["questions"] as? [[String: Any]],
-                       let question = questions.first?["question"] as? String {
-                        detail.pendingQuestion = clip(question, 160)
-                    } else {
-                        detail.pendingTool = toolSummary(name: name, input: input)
-                    }
-                }
-            }
-            isLatestEntry = false
-
-            if detail.lastResponse == nil {
-                let texts = blocks.compactMap { block -> String? in
-                    block["type"] as? String == "text" ? block["text"] as? String : nil
-                }
-                let joined = texts.joined(separator: " ")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                if !joined.isEmpty { detail.lastResponse = clip(joined, 200) }
-            }
-            if detail.lastResponse != nil { break }
-        }
-        return detail
-    }
-
-    /// Compact "ToolName — key argument" line for a pending tool call.
-    private static func toolSummary(name: String, input: [String: Any]) -> String {
-        let hintKeys = ["command", "file_path", "description", "pattern", "query", "url", "prompt"]
-        for key in hintKeys {
-            if let value = input[key] as? String, !value.isEmpty {
-                return "\(name) — \(clip(value, 100))"
-            }
-        }
-        return name
-    }
-
-    static func clip(_ text: String, _ limit: Int) -> String {
-        let flat = text.replacingOccurrences(of: "\n", with: " ")
-        return flat.count > limit ? String(flat.prefix(limit)) + "…" : flat
     }
 
     // MARK: - Working directory
 
     private func workingDirectory(for pid: Int32) -> String? {
         if let cached = cwdCache[pid] { return cached }
-        let path = Self.workingDirectory(of: pid)
+        // A failed read is not cached: libproc can transiently fail while a
+        // process is still starting up, and caching that nil would strip the
+        // session of its project name and transcript for its whole life.
+        guard let path = Self.workingDirectory(of: pid) else { return nil }
         cwdCache[pid] = path
         return path
     }
@@ -626,37 +509,5 @@ final class ProcessMonitor {
             guard let base = raw.bindMemory(to: CChar.self).baseAddress else { return nil }
             return String(cString: base)
         }
-    }
-
-    // MARK: - Process listing
-
-    /// Returns (pid, ppid, cpuPercent, args) for every visible process.
-    static func listProcesses() -> [(pid: Int32, ppid: Int32, cpu: Double, args: String)]? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-Axo", "pid=,ppid=,pcpu=,args="]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-        } catch {
-            return nil
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard let output = String(data: data, encoding: .utf8) else { return nil }
-
-        var result: [(Int32, Int32, Double, String)] = []
-        for line in output.split(separator: "\n") {
-            let parts = line.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: true)
-            guard parts.count == 4,
-                  let pid = Int32(parts[0]),
-                  let ppid = Int32(parts[1]),
-                  let cpu = Double(parts[2]) else { continue }
-            result.append((pid, ppid, cpu, String(parts[3])))
-        }
-        return result
     }
 }

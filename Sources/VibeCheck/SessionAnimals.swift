@@ -3,6 +3,7 @@ import Foundation
 /// Assigns each live session (terminal) its own animal, stable for the
 /// session's lifetime. Distinct sessions get distinct animals when possible.
 /// Main-thread only.
+@MainActor
 enum SessionAnimals {
     private static var assigned: [Int32: (assistantID: String, emoji: String)] = [:]
 
@@ -15,8 +16,8 @@ enum SessionAnimals {
         if preferred != RunnerSettings.randomValue, !used.contains(preferred) {
             pick = preferred
         } else {
-            let available = RunnerSettings.animals.map(\.emoji).filter { !used.contains($0) }
-            pick = available.randomElement() ?? RunnerSettings.animals.randomElement()!.emoji
+            let available = RunnerSettings.animals.filter { !used.contains($0) }
+            pick = available.randomElement() ?? RunnerSettings.animals[0]
         }
         assigned[session.pid] = (session.assistant.id, pick)
         return pick

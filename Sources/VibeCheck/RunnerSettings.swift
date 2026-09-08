@@ -4,11 +4,11 @@ import Foundation
 /// The preference seeds session animals: an assistant's first session gets the
 /// preferred animal; further sessions get distinct ones (see SessionAnimals).
 enum RunnerSettings {
-    static let animals: [(emoji: String, name: String)] = [
-        ("🐎", "말"), ("🦄", "유니콘"), ("🐫", "낙타"), ("🐕", "개"),
-        ("🐈", "고양이"), ("🐇", "토끼"), ("🐢", "거북이"), ("🦖", "공룡"),
-        ("🐖", "돼지"), ("🐄", "소"), ("🦌", "사슴"), ("🦘", "캥거루"),
-        ("🐆", "치타"), ("🐿️", "다람쥐"),
+    /// Display order of the runner animals. Their names are localized in
+    /// `L10n.animalName(_:)`.
+    static let animals: [String] = [
+        "🐎", "🦄", "🐫", "🐕", "🐈", "🐇", "🐢",
+        "🦖", "🐖", "🐄", "🦌", "🦘", "🐆", "🐿️",
     ]
 
     /// Sentinel stored value meaning "always pick a random animal".

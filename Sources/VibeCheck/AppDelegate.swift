@@ -1,5 +1,6 @@
 import AppKit
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var monitor: ProcessMonitor!
     private var overlay: OverlayController!
@@ -14,6 +15,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         usageTracker.onUpdate = { [weak self] window in
             self?.overlay.usageWindow = window
             self?.statusBar.usageWindow = window
+        }
+        // A block can begin the moment a session starts a turn. Without this
+        // the runner spent up to a minute drawn against a stale window — long
+        // enough to be visibly wrong right after a break.
+        monitor.onSessionActive = { [weak self] in
+            self?.usageTracker.refreshNow()
         }
         HookBridge.pruneStaleFiles()
         monitor.start()

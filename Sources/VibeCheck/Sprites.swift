@@ -6,7 +6,7 @@ import AppKit
 /// ground row so runners align on a common baseline.
 enum Sprites {
     static let pixelSize: CGFloat = 3.2
-    private static let gridW = 22
+    fileprivate static let gridW = 22
     private static let gridH = 14
 
     static var size: NSSize {
@@ -65,9 +65,11 @@ enum Sprites {
         "🦖": Species(.upright, body: (0.38, 0.68, 0.44), accent: (0.20, 0.45, 0.28), accessory: .spikes),
     ]
 
-    private static var cache: [String: [NSImage]] = [:]
+    /// Rendered frames are cached on the main actor, which is the only place
+    /// the overlay and the dev flags ever ask for them.
+    @MainActor private static var cache: [String: [NSImage]] = [:]
 
-    static func frames(for emoji: String) -> [NSImage] {
+    @MainActor static func frames(for emoji: String) -> [NSImage] {
         if let cached = cache[emoji] { return cached }
         let spec = species[emoji] ?? species["🐎"]!
         let images = (0..<4).map { render(spec, frame: $0) }
@@ -75,14 +77,27 @@ enum Sprites {
         return images
     }
 
-    /// Static marker shown in place of a runner once its usage window is
-    /// fully spent — a small grave in the same pixel-art grid as the animals.
-    static let tombstone: NSImage = renderTombstone()
+    /// Static marker shown in place of a runner once Claude has reported that
+    /// the usage limit is reached — a small grave in the animals' pixel grid.
+    @MainActor static let tombstone: NSImage = renderTombstone()
 
     // MARK: - Rendering
 
-    private static func render(_ spec: Species, frame: Int) -> NSImage {
-        let image = NSImage(size: size)
+    /// Renders one gait frame. `pixelSize` is how many points one art pixel
+    /// occupies: the overlay uses the default, the app icon asks for a large
+    /// whole number so its edges stay sharp instead of being an upscale of
+    /// the small, antialiased on-screen bitmap.
+    @MainActor static func sprite(
+        _ emoji: String, frame: Int, pixelSize: CGFloat
+    ) -> NSImage {
+        render(species[emoji] ?? species["\u{1F40E}"]!, frame: frame, pixelSize: pixelSize)
+    }
+
+    private static func render(
+        _ spec: Species, frame: Int, pixelSize: CGFloat = Sprites.pixelSize
+    ) -> NSImage {
+        let image = NSImage(size: NSSize(
+            width: CGFloat(gridW) * pixelSize, height: CGFloat(gridH) * pixelSize))
         image.lockFocus()
         NSGraphicsContext.current?.imageInterpolation = .none
 
@@ -287,5 +302,103 @@ enum Sprites {
 
         image.unlockFocus()
         return image
+    }
+
+    // MARK: - Exported images
+
+    /// Every animal's four gait frames as one contact sheet. The only capture
+    /// of this app that contains no session information at all.
+    @MainActor static func writeContactSheet(to url: URL) -> Bool {
+        let scale: CGFloat = 2
+        let columns = 4
+        let rows = RunnerSettings.animals.count
+        let pad: CGFloat = 8
+        let sheet = NSImage(size: NSSize(
+            width: (size.width * scale + pad) * CGFloat(columns) + pad,
+            height: (size.height * scale + pad) * CGFloat(rows) + pad))
+        sheet.lockFocus()
+        NSColor.white.setFill()
+        NSRect(origin: .zero, size: sheet.size).fill()
+        NSGraphicsContext.current?.imageInterpolation = .none
+        for (row, animal) in RunnerSettings.animals.enumerated() {
+            for (column, frame) in frames(for: animal).enumerated() {
+                let origin = NSPoint(
+                    x: pad + CGFloat(column) * (size.width * scale + pad),
+                    y: sheet.size.height - (pad + size.height * scale
+                        + CGFloat(row) * (size.height * scale + pad)))
+                frame.draw(in: NSRect(origin: origin, size: NSSize(
+                    width: size.width * scale, height: size.height * scale)))
+            }
+        }
+        sheet.unlockFocus()
+        return write(sheet, to: url)
+    }
+
+    /// The app icon: the horse on a rounded tile, rendered at every size
+    /// macOS asks for. Generated at build time so no binary asset has to be
+    /// checked in, and so the icon can never drift from the sprites.
+    @MainActor static func writeIconSet(to directory: URL) -> Bool {
+        try? FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        let variants: [(name: String, pixels: CGFloat)] = [
+            ("icon_16x16.png", 16), ("icon_16x16@2x.png", 32),
+            ("icon_32x32.png", 32), ("icon_32x32@2x.png", 64),
+            ("icon_128x128.png", 128), ("icon_128x128@2x.png", 256),
+            ("icon_256x256.png", 256), ("icon_256x256@2x.png", 512),
+            ("icon_512x512.png", 512), ("icon_512x512@2x.png", 1024),
+        ]
+        for variant in variants {
+            guard let rep = iconRep(pixels: Int(variant.pixels)),
+                  let png = rep.representation(using: .png, properties: [:]),
+                  (try? png.write(to: directory.appendingPathComponent(variant.name))) != nil
+            else { return false }
+        }
+        return true
+    }
+
+    /// One icon variant at exact pixel dimensions.
+    ///
+    /// Drawing through `NSImage.lockFocus` would render at the display's
+    /// backing scale, so on a Retina machine every icon came out at twice the
+    /// size macOS asked for. Drawing into a bitmap of a stated pixel size
+    /// makes the output identical on any display.
+    @MainActor private static func iconRep(pixels: Int) -> NSBitmapImageRep? {
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
+        else { return nil }
+        rep.size = NSSize(width: pixels, height: pixels)  // one point = one pixel
+
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSGraphicsContext.current?.imageInterpolation = .none
+
+        let side = CGFloat(pixels)
+        let inset = side * 0.06
+        let plate = NSRect(x: inset, y: inset, width: side - inset * 2, height: side - inset * 2)
+        NSColor(calibratedRed: 0.13, green: 0.14, blue: 0.17, alpha: 1).setFill()
+        NSBezierPath(roundedRect: plate,
+                     xRadius: side * 0.22, yRadius: side * 0.22).fill()
+
+        // Drawn at a whole number of points per art pixel, so the icon has
+        // no seams and no half-pixels at any of the ten sizes macOS wants.
+        let target = plate.width * 0.78
+        let step = max(1, (target / CGFloat(gridW)).rounded(.down))
+        let runner = sprite("🐎", frame: 0, pixelSize: step)
+        runner.draw(in: NSRect(
+            x: plate.midX - runner.size.width / 2,
+            y: plate.midY - runner.size.height / 2,
+            width: runner.size.width, height: runner.size.height))
+        return rep
+    }
+
+    private static func write(_ image: NSImage, to url: URL) -> Bool {
+        guard let tiff = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let png = rep.representation(using: .png, properties: [:])
+        else { return false }
+        return (try? png.write(to: url)) != nil
     }
 }

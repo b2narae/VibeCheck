@@ -15,6 +15,10 @@ struct HookState {
     let phase: Phase
     let message: String?
     let updated: Date
+    /// Which assistant reported this. Without it a report would be matched to
+    /// any session sharing the working directory — a Claude hook would hand
+    /// its phase to a Codex session running in the same folder.
+    let assistantID: String
 }
 
 /// Bridges Claude Code hooks into VibeCheck.
@@ -106,7 +110,11 @@ enum HookBridge {
         ]
         if let cwd { record["cwd"] = cwd }
         if let message { record["message"] = message }
-        if let pid = resolveAssistantPID() { record["pid"] = Int(pid) }
+        let resolved = resolveAssistant()
+        if let pid = resolved?.pid { record["pid"] = Int(pid) }
+        // Only Claude Code invokes these hooks today, but recording the
+        // assistant keeps the match honest if that ever changes.
+        record["assistant"] = resolved?.assistantID ?? "claude" 
 
         try? FileManager.default.createDirectory(
             at: stateDirectory, withIntermediateDirectories: true)
@@ -121,18 +129,19 @@ enum HookBridge {
     /// Hooks block the session that invokes them, so this takes the libproc
     /// path (a few syscalls) and only falls back to listing every process when
     /// the executable name alone cannot identify the assistant.
-    private static func resolveAssistantPID() -> Int32? {
+    private static func resolveAssistant() -> (pid: Int32, assistantID: String)? {
         var pid = getppid()
         for _ in 0..<8 {
             guard pid > 1 else { break }
             if let name = executableName(of: pid),
-               ProcessMonitor.assistants.contains(where: { $0.binaryNames.contains(name) }) {
-                return pid
+               let assistant = ProcessMonitor.assistants
+                   .first(where: { $0.binaryNames.contains(name) }) {
+                return (pid, assistant.id)
             }
             guard let parent = parentPID(of: pid) else { break }
             pid = parent
         }
-        return resolveAssistantPIDByScanning()
+        return resolveAssistantByScanning()
     }
 
     private static func executableName(of pid: Int32) -> String? {
@@ -150,19 +159,14 @@ enum HookBridge {
         return Int32(info.pbi_ppid)
     }
 
-    private static func resolveAssistantPIDByScanning() -> Int32? {
-        guard let processes = ProcessMonitor.listProcesses() else { return nil }
-        var parent: [Int32: Int32] = [:]
-        var args: [Int32: String] = [:]
-        for process in processes {
-            parent[process.pid] = process.ppid
-            args[process.pid] = process.args
-        }
+    private static func resolveAssistantByScanning() -> (pid: Int32, assistantID: String)? {
         var pid = getppid()
         for _ in 0..<8 {
-            guard let line = args[pid] else { return nil }
-            if ProcessMonitor.match(args: line) != nil { return pid }
-            guard let next = parent[pid], next > 1 else { return nil }
+            guard pid > 1, let line = ProcessList.arguments(of: pid) else { return nil }
+            if let assistant = ProcessMonitor.match(args: line) {
+                return (pid, assistant.id)
+            }
+            guard let next = parentPID(of: pid), next > 1 else { return nil }
             pid = next
         }
         return nil
@@ -190,7 +194,8 @@ enum HookBridge {
             cwd: object["cwd"] as? String,
             phase: phase,
             message: object["message"] as? String,
-            updated: Date(timeIntervalSince1970: updated))
+            updated: Date(timeIntervalSince1970: updated),
+            assistantID: object["assistant"] as? String ?? "claude")
     }
 
     /// Removes state files left behind by sessions that ended without a

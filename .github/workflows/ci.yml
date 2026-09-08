@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: swift --version
+
+      # Both builds have to stay green: SwiftPM is what contributors reach
+      # for first, and scripts/build.sh is what actually ships the app.
+      - name: swift build
+        run: swift build
+
+      - name: swift test
+        run: swift test
+
+      - name: scripts/build.sh
+        run: ./scripts/build.sh
+
+      - name: scripts/make-app.sh
+        run: ./scripts/make-app.sh
+
+      - name: The dev flags still answer
+        run: |
+          ./build/VibeCheck --hooks-status
+          ./build/VibeCheck --check-usage
