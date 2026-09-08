@@ -82,6 +82,24 @@ Write fixture tests for every tail state, the way
 `Tests/VibeCheckTests/TranscriptTests.swift` does. Detection has been wrong four
 separate times and the tests are what keep each fix in place.
 
+## Working on the overlay without real sessions
+
+```bash
+./scripts/demo-sessions.sh up      # three staged sessions, one at a wall
+./scripts/demo-sessions.sh down    # stop and clean up
+```
+
+This stages fake assistant processes and hand-written transcripts in a
+throwaway directory, then launches VibeCheck against it with `CLAUDE_CONFIG_DIR`
+and `CODEX_HOME` pointed there. Nothing reads or writes your real `~/.claude` or
+`~/.codex`, no quota is spent, and no real prompt is ever on screen — which is
+also what makes it the right way to take a screenshot. `shot` captures, and
+prints what to check before publishing.
+
+It is a useful test of the readers in itself: the runners you see are driven
+entirely by files the script wrote, so if one behaves oddly, the input is right
+there to read.
+
 ## Tests
 
 ```bash

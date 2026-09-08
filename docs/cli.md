@@ -134,6 +134,26 @@ Renders the ten PNGs macOS wants for an `.icns`. `scripts/make-app.sh` calls
 this and pipes the result through `iconutil`, which is why no icon asset is
 checked in and the icon cannot drift from the sprites.
 
+## Staging sessions for a screenshot
+
+`scripts/demo-sessions.sh` creates fake assistant processes and transcripts in a
+temporary directory and runs VibeCheck against them, so the overlay can be
+photographed or worked on without a real project on screen.
+
+```console
+$ ./scripts/demo-sessions.sh up
+staged in /var/folders/.../vibecheck-demo
+  running: checkout-service, pixel-garden   blocked at a wall: notes-api
+
+$ ./scripts/demo-sessions.sh shot     # captures, plus a 1200x750 derivative
+$ ./scripts/demo-sessions.sh down
+```
+
+**Sessions the script did not create still appear.** VibeCheck sees every
+assistant process you are running, so close the others first if the count
+matters. With the menu closed no names are visible — the menu bar is emoji
+only — but the dropdown and the click panel both name projects.
+
 ## Environment variables
 
 | Variable | Effect |
