@@ -15,6 +15,10 @@ enum LogTailState: String, Sendable {
 struct SessionDetail: Sendable {
     /// Most recent assistant text (the answer in progress, or the last one).
     var lastResponse: String?
+    /// The instruction the session was last given. Collected in the same
+    /// backward pass as the rest: reading the tail is the expensive part, and
+    /// asking for this separately meant reading it twice.
+    var lastPrompt: String?
     /// The question text when the assistant asked one outright.
     var pendingQuestion: String?
     /// "ToolName — argument" summary of a pending tool call.
@@ -46,6 +50,44 @@ enum Transcripts {
     }
 
     // MARK: - Shared helpers
+
+    /// How much of a transcript's tail to keep in reach when looking for the
+    /// instruction and the last answer. They are usually within a few hundred
+    /// kilobytes of the end, but a long tool-heavy turn buries them — in a
+    /// real 34 MB Codex rollout the last instruction sat 2.75 MB back.
+    static let deepChunk: UInt64 = 4 << 20
+
+    /// Calls `body` with each line of the file's tail, newest first, and stops
+    /// as soon as it returns true.
+    ///
+    /// Only the lines actually examined are decoded. That is the whole point:
+    /// these transcripts answer every question from their newest few entries,
+    /// so splitting a multi-megabyte tail into strings up front does work that
+    /// is thrown away — and doing it repeatedly with a growing window, which
+    /// is the obvious way to reach a buried instruction, measured worse than
+    /// the fixed window it replaced.
+    static func forEachLineFromEnd(of url: URL, limit: UInt64, _ body: (String) -> Bool) {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        try? handle.seek(toOffset: size > limit ? size - limit : 0)
+        guard let data = try? handle.readToEnd(), !data.isEmpty else { return }
+
+        let bytes = [UInt8](data)
+        let newline = UInt8(ascii: "\n")
+        var end = bytes.count
+        if end > 0, bytes[end - 1] == newline { end -= 1 }  // a trailing NL is not a line
+        while end > 0 {
+            var start = end
+            while start > 0, bytes[start - 1] != newline { start -= 1 }
+            if start < end,
+               body(String(decoding: bytes[start..<end], as: UTF8.self)) { return }
+            // The first line of the window is usually a fragment; it simply
+            // fails to parse and the walk ends here either way.
+            if start == 0 { return }
+            end = start - 1
+        }
+    }
 
     /// Reads the last `limit` bytes of a file as text. Transcripts are
     /// append-only JSONL, so the tail is all any of these questions need.

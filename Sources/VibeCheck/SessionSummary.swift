@@ -5,7 +5,22 @@ import Foundation
 ///
 /// Everything here reads the transcript that `ProcessMonitor` already
 /// resolved and hung on the session, so no caller searches the disk.
+///
+/// Results are cached per (file, mtime). Building the menu reads the tail of
+/// every live session's transcript synchronously on the main thread, which
+/// measured 173 ms across five sessions — a visible hitch every time the menu
+/// opened. Transcripts are append-only, so an unchanged mtime means the answer
+/// is unchanged, and only sessions that actually wrote something since the last
+/// look cost anything.
+@MainActor
 enum SessionSummary {
+    private struct CacheKey: Hashable {
+        let path: String
+        let mtime: Date
+        let needsAttention: Bool
+    }
+    private static var cache: [CacheKey: [String]] = [:]
+
     static func stateText(_ session: SessionStatus) -> String {
         if session.needsAttention {
             return L10n.t("🧱 waiting for you", "🧱 입력을 기다리는 중")
@@ -24,6 +39,21 @@ enum SessionSummary {
     /// instruction it was given.
     static func detailLines(_ session: SessionStatus) -> [String] {
         guard let reader = session.transcript, let file = session.logFile else { return [] }
+        let key = CacheKey(
+            path: file.path, mtime: Transcripts.modified(file),
+            needsAttention: session.needsAttention)
+        if let cached = cache[key] { return cached }
+
+        let lines = buildDetailLines(session, reader: reader, file: file)
+        // Only the newest state of each transcript is worth keeping.
+        cache = cache.filter { $0.key.path != key.path }
+        cache[key] = lines
+        return lines
+    }
+
+    private static func buildDetailLines(
+        _ session: SessionStatus, reader: any TranscriptReader.Type, file: URL
+    ) -> [String] {
         let detail = reader.detail(in: file)
         var lines: [String] = []
 
@@ -42,7 +72,7 @@ enum SessionSummary {
             lines.append(L10n.t("🗨️ \(response)", "🗨️ \(response)"))
         }
 
-        if let prompt = reader.lastUserPrompt(in: file) {
+        if let prompt = detail?.lastPrompt {
             lines.append("💬 \(prompt)")
         }
         return lines

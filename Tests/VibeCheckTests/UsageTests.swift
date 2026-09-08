@@ -75,6 +75,21 @@ struct UsageLineTests {
             == Date(timeIntervalSince1970: 1786050000))
     }
 
+    @Test("A transcript discussing the limit marker does not trigger it")
+    func discussingTheMarkerIsNotAReport() {
+        // Taken from a real session: asking Claude to grep for this very
+        // marker writes the marker text into the transcript, as an assistant
+        // tool_use entry. Fifteen such lines existed in one day's logs and
+        // none may raise the tombstone — isApiErrorMessage is what separates
+        // a report from a mention.
+        let line = #"""
+            {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use",\
+            "name":"Bash","input":{"command":"grep -rh 'usage limit reached|' ~/.claude"}}],\
+            "stop_reason":"tool_use"}}
+            """#
+        #expect(UsageWindowTracker.usageLimitReset(in: line) == nil)
+    }
+
     @Test("Text that merely mentions the limit is not a limit report")
     func mentionIsNotReport() {
         // A conversation *about* rate limits must not tombstone the runner.

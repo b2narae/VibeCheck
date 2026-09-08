@@ -8,12 +8,27 @@ import Foundation
 /// this existed, a Codex session waiting on the API looked finished: the
 /// runner ran off screen and the completion sound fired mid-turn.
 enum CodexTranscript: TranscriptReader {
+    /// Enough of the tail to settle the turn state, which the newest few
+    /// entries always decide.
     private static let tailChunk: UInt64 = 262_144
-    private static let headChunk = 32_768
-    /// Rollout files live in sessions/YYYY/MM/DD; only the newest few day
-    /// folders can hold a live session, so history size never costs anything.
-    private static let dayFoldersScanned = 3
-    private static let maxCandidates = 40
+    /// The instruction and the last answer can sit much further back in a
+    /// tool-heavy turn — a 32 MB rollout can carry a megabyte of tool traffic
+    /// since the user last typed — so the detail pass reads a wider window,
+    /// matching what the Claude reader does.
+    private static let detailChunk: UInt64 = 1_048_576
+    private static let headChunk = 65_536
+    /// Rollout files live in sessions/YYYY/MM/DD under the date the session
+    /// *started*, and a session that outlives that day keeps writing to the
+    /// same file. Sampling this machine's history, 1 session in 10 was still
+    /// being written a day or more after its folder's date, one of them four
+    /// days later — so a window of three folders silently lost exactly the
+    /// long-running sessions this reader exists to track.
+    private static let dayFoldersScanned = 14
+    /// A live session is by definition being appended to right now, so mtime
+    /// is the real filter. It also keeps dead sessions from costing a head
+    /// read on every miss.
+    private static let liveWindow: TimeInterval = 3 * 86_400
+    private static let maxCandidates = 12
 
     static var sessionsDirectory: URL {
         let home = ProcessInfo.processInfo.environment["CODEX_HOME"].flatMap {
@@ -37,8 +52,8 @@ enum CodexTranscript: TranscriptReader {
         return nil
     }
 
-    /// Rollout files from the newest day folders, newest write first.
-    private static func recentRollouts() -> [URL] {
+    /// Rollout files that could belong to a live session, newest write first.
+    private static func recentRollouts(now: Date = Date()) -> [URL] {
         let fm = FileManager.default
         let root = sessionsDirectory
         guard let years = try? fm.contentsOfDirectory(
@@ -59,17 +74,21 @@ enum CodexTranscript: TranscriptReader {
             }
         }
 
-        var files: [URL] = []
+        let cutoff = now.addingTimeInterval(-liveWindow)
+        var files: [(url: URL, mtime: Date)] = []
         for day in days.suffix(dayFoldersScanned) {
             guard let contents = try? fm.contentsOfDirectory(
                 at: day, includingPropertiesForKeys: [.contentModificationDateKey])
             else { continue }
-            files += contents.filter { $0.pathExtension == "jsonl" }
+            for url in contents where url.pathExtension == "jsonl" {
+                let mtime = Transcripts.modified(url)
+                if mtime > cutoff { files.append((url, mtime)) }
+            }
         }
         return files
-            .sorted { Transcripts.modified($0) > Transcripts.modified($1) }
+            .sorted { $0.mtime > $1.mtime }
             .prefix(maxCandidates)
-            .map { $0 }
+            .map(\.url)
     }
 
     // MARK: - Turn state
@@ -109,50 +128,57 @@ enum CodexTranscript: TranscriptReader {
     }
 
     static func tailState(_ url: URL) -> LogTailState {
-        guard let text = Transcripts.tail(of: url, limit: tailChunk) else { return .unknown }
-        for line in text.split(separator: "\n").reversed() {
-            guard let entry = parse(line) else { continue }
-            if let state = decision(type: entry.type, payload: entry.payloadType) {
-                // A tool call that already carries a terminal status is not
-                // pending — Codex rewrites the record once the call returns.
-                if state == .pendingToolUse,
-                   let status = entry.payload["status"] as? String,
-                   status == "completed" || status == "failed" {
-                    return .awaitingAssistant
-                }
-                return state
+        var result = LogTailState.unknown
+        Transcripts.forEachLineFromEnd(of: url, limit: tailChunk) { line in
+            guard let entry = parse(line),
+                  let state = decision(type: entry.type, payload: entry.payloadType)
+            else { return false }
+            // A tool call that already carries a terminal status is not
+            // pending — Codex rewrites the record once the call returns.
+            if state == .pendingToolUse,
+               let status = entry.payload["status"] as? String,
+               status == "completed" || status == "failed" {
+                result = .awaitingAssistant
+            } else {
+                result = state
             }
+            return true
         }
-        return .unknown
+        return result
     }
 
     static func lastUserPrompt(in url: URL) -> String? {
-        guard let text = Transcripts.tail(of: url, limit: tailChunk) else { return nil }
-        for line in text.split(separator: "\n").reversed() {
+        var found: String?
+        Transcripts.forEachLineFromEnd(of: url, limit: Transcripts.deepChunk) { line in
             guard let entry = parse(line),
                   entry.type == "event_msg", entry.payloadType == "user_message",
-                  let message = entry.payload["message"] as? String
-            else { continue }
-            let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, !trimmed.hasPrefix("<") else { continue }
-            return Transcripts.clip(trimmed, 120)
+                  let prompt = userMessageText(entry.payload)
+            else { return false }
+            found = prompt
+            return true
         }
-        return nil
+        return found
+    }
+
+    /// The user's own text in a `user_message` event, or nil for wrappers.
+    private static func userMessageText(_ payload: [String: Any]) -> String? {
+        guard let message = payload["message"] as? String else { return nil }
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.hasPrefix("<") else { return nil }
+        return Transcripts.clip(trimmed, 120)
     }
 
     static func detail(in url: URL) -> SessionDetail? {
-        guard let text = Transcripts.tail(of: url, limit: tailChunk) else { return nil }
-
         var detail = SessionDetail()
         var sawProgress = false
-        for line in text.split(separator: "\n").reversed() {
-            guard let entry = parse(line) else { continue }
+        Transcripts.forEachLineFromEnd(of: url, limit: Transcripts.deepChunk) { line in
+            guard let entry = parse(line) else { return false }
 
             if entry.type == "event_msg", entry.payloadType.hasSuffix("_approval_request") {
                 if detail.pendingTool == nil {
                     detail.pendingTool = approvalSummary(entry.payload)
                 }
-                continue
+                return false
             }
             // Only a tool call that is still the newest thing in the log is
             // the one the session is stopped on.
@@ -172,7 +198,12 @@ enum CodexTranscript: TranscriptReader {
                let message = entry.payload["message"] as? String, !message.isEmpty {
                 detail.lastResponse = Transcripts.clip(message, 200)
             }
-            if detail.lastResponse != nil && detail.pendingTool != nil { break }
+            if detail.lastPrompt == nil, entry.type == "event_msg",
+               entry.payloadType == "user_message",
+               let prompt = userMessageText(entry.payload) {
+                detail.lastPrompt = prompt
+            }
+            return detail.lastResponse != nil && detail.lastPrompt != nil
         }
         return detail
     }
@@ -185,7 +216,7 @@ enum CodexTranscript: TranscriptReader {
         let payload: [String: Any]
     }
 
-    private static func parse(_ line: Substring) -> Entry? {
+    private static func parse(_ line: some StringProtocol) -> Entry? {
         guard line.contains("\"payload\""),
               let object = try? JSONSerialization.jsonObject(with: Data(line.utf8))
                   as? [String: Any],

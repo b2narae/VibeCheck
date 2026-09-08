@@ -118,6 +118,8 @@ final class ProcessMonitor: @unchecked Sendable {
     private var lastSessions: [Int32: SessionStatus] = [:]
     private var cwdCache: [Int32: String] = [:]
     private var logFileCache: [Int32: URL] = [:]
+    /// When a session's transcript could not be found, when to look again.
+    private var logFileRetry: [Int32: Date] = [:]
     private var logTailCache: [String: (mtime: Date, state: LogTailState)] = [:]
 
     func start() {
@@ -225,7 +227,7 @@ final class ProcessMonitor: @unchecked Sendable {
             let sessionID = argsSessionID ?? hook?.sessionID
             let logFile = logFile(
                 for: pid, assistantID: assistant.id,
-                projectPath: projectPath, sessionID: sessionID)
+                projectPath: projectPath, sessionID: sessionID, now: now)
             let tail = logFile.flatMap { self.logTail(assistantID: assistant.id, file: $0) }
 
             if history.count < 2 {
@@ -303,6 +305,7 @@ final class ProcessMonitor: @unchecked Sendable {
         lastAttention = lastAttention.filter { sessionPids.contains($0.key) }
         cwdCache = cwdCache.filter { sessionPids.contains($0.key) }
         logFileCache = logFileCache.filter { sessionPids.contains($0.key) }
+        logFileRetry = logFileRetry.filter { sessionPids.contains($0.key) }
         lastSessions = currentSessions
 
         let statuses = Self.assistants.map { assistant in
@@ -451,20 +454,33 @@ final class ProcessMonitor: @unchecked Sendable {
 
     // MARK: - Transcript
 
+    /// How long to wait before searching again for a transcript that could
+    /// not be found. A miss is not cached permanently — a session's log may
+    /// not exist yet on the first poll, and Codex writes its rollout a moment
+    /// after start — but retrying every 1.5s is not free either: locating a
+    /// Codex rollout means reading the head of each candidate file, so a
+    /// session whose log never turns up would otherwise re-read them for as
+    /// long as it lives.
+    private let logFileRetryInterval: TimeInterval = 15
+
     /// Resolves (and remembers) the transcript file backing a session.
-    /// Failures are never cached: a session's log may not exist yet on the
-    /// first poll, and Codex writes its rollout file a moment after start.
     private func logFile(
-        for pid: Int32, assistantID: String, projectPath: String?, sessionID: String?
+        for pid: Int32, assistantID: String, projectPath: String?, sessionID: String?,
+        now: Date
     ) -> URL? {
         if let cached = logFileCache[pid],
            FileManager.default.fileExists(atPath: cached.path) {
             return cached
         }
+        if let retryAt = logFileRetry[pid], now < retryAt { return nil }
         guard let reader = Transcripts.reader(for: assistantID),
               let file = reader.logFile(projectPath: projectPath, sessionID: sessionID)
-        else { return nil }
+        else {
+            logFileRetry[pid] = now.addingTimeInterval(logFileRetryInterval)
+            return nil
+        }
         logFileCache[pid] = file
+        logFileRetry.removeValue(forKey: pid)
         return file
     }
 

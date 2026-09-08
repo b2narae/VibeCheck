@@ -37,31 +37,35 @@ enum ClaudeTranscript: TranscriptReader {
     /// than string-matched, so text that merely mentions these keys cannot be
     /// mistaken for structure.
     static func tailState(_ url: URL) -> LogTailState {
-        guard let text = Transcripts.tail(of: url, limit: tailChunk) else { return .unknown }
-
-        for line in text.split(separator: "\n").reversed() {
+        var result = LogTailState.unknown
+        Transcripts.forEachLineFromEnd(of: url, limit: tailChunk) { line in
             // Loose prefilter (whitespace-agnostic); the JSON parse decides.
             guard line.contains("assistant") || line.contains("user"),
                   let object = try? JSONSerialization.jsonObject(with: Data(line.utf8))
                       as? [String: Any],
                   let type = object["type"] as? String
-            else { continue }
+            else { return false }
 
-            if type == "user" { return .awaitingAssistant }
-            guard type == "assistant" else { continue }
+            if type == "user" {
+                result = .awaitingAssistant
+                return true
+            }
+            guard type == "assistant" else { return false }
 
             let message = object["message"] as? [String: Any]
             let blocks = message?["content"] as? [[String: Any]] ?? []
             if blocks.contains(where: { $0["type"] as? String == "tool_use" }) {
-                return .pendingToolUse
+                result = .pendingToolUse
+                return true
             }
             // Text and thinking blocks are written mid-turn too, so their mere
             // presence means nothing. stop_reason is what says whether the
             // model is done: "tool_use" means another block is still coming.
-            return endOfTurnReasons.contains(message?["stop_reason"] as? String ?? "")
+            result = endOfTurnReasons.contains(message?["stop_reason"] as? String ?? "")
                 ? .turnEnded : .awaitingAssistant
+            return true
         }
-        return .unknown
+        return result
     }
 
     private static let endOfTurnReasons: Set<String> = [
@@ -71,55 +75,38 @@ enum ClaudeTranscript: TranscriptReader {
     /// The most recent real user prompt — i.e. what the session was asked to
     /// do. Skips tool results, slash commands, and meta entries.
     static func lastUserPrompt(in url: URL) -> String? {
-        guard let text = Transcripts.tail(of: url, limit: promptChunk) else { return nil }
-
-        for line in text.split(separator: "\n").reversed() {
+        var found: String?
+        Transcripts.forEachLineFromEnd(of: url, limit: Transcripts.deepChunk) { line in
             guard line.contains("\"type\":\"user\""),
                   let object = try? JSONSerialization.jsonObject(with: Data(line.utf8))
                       as? [String: Any],
                   object["type"] as? String == "user",
-                  object["isMeta"] as? Bool != true,
-                  let message = object["message"] as? [String: Any]
-            else { continue }
-
-            var prompt: String?
-            if let content = message["content"] as? String {
-                prompt = content
-            } else if let items = message["content"] as? [[String: Any]] {
-                let texts = items.compactMap { item -> String? in
-                    item["type"] as? String == "text" ? item["text"] as? String : nil
-                }
-                if !texts.isEmpty { prompt = texts.joined(separator: " ") }
-            }
-
-            guard let result = prompt?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !result.isEmpty,
-                  !result.hasPrefix("<"),          // command/system-reminder wrappers
-                  !result.hasPrefix("[Request"),   // interruption markers
-                  !result.hasPrefix("Caveat:")
-            else { continue }
-            return Transcripts.clip(result, 120)
+                  let prompt = promptText(in: object)
+            else { return false }
+            found = prompt
+            return true
         }
-        return nil
+        return found
     }
 
     static func detail(in url: URL) -> SessionDetail? {
-        guard let text = Transcripts.tail(of: url, limit: promptChunk) else { return nil }
-
         var detail = SessionDetail()
         var isLatestEntry = true
-        for line in text.split(separator: "\n").reversed() {
+        Transcripts.forEachLineFromEnd(of: url, limit: Transcripts.deepChunk) { line in
             guard line.contains("assistant") || line.contains("user"),
                   let object = try? JSONSerialization.jsonObject(with: Data(line.utf8))
                       as? [String: Any],
                   let type = object["type"] as? String,
                   type == "assistant" || type == "user"
-            else { continue }
+            else { return false }
 
             if type == "user" {
                 // A user/tool_result entry answers everything before it.
                 isLatestEntry = false
-                continue
+                if detail.lastPrompt == nil, let prompt = promptText(in: object) {
+                    detail.lastPrompt = prompt
+                }
+                return detail.lastResponse != nil && detail.lastPrompt != nil
             }
 
             let message = object["message"] as? [String: Any]
@@ -150,8 +137,33 @@ enum ClaudeTranscript: TranscriptReader {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if !joined.isEmpty { detail.lastResponse = Transcripts.clip(joined, 200) }
             }
-            if detail.lastResponse != nil { break }
+            return detail.lastResponse != nil && detail.lastPrompt != nil
         }
         return detail
+    }
+
+    /// The user-authored text of a "user" entry, or nil when the entry is a
+    /// tool result, a slash command, or other bookkeeping.
+    private static func promptText(in object: [String: Any]) -> String? {
+        guard object["isMeta"] as? Bool != true,
+              let message = object["message"] as? [String: Any] else { return nil }
+
+        var prompt: String?
+        if let content = message["content"] as? String {
+            prompt = content
+        } else if let items = message["content"] as? [[String: Any]] {
+            let texts = items.compactMap { item -> String? in
+                item["type"] as? String == "text" ? item["text"] as? String : nil
+            }
+            if !texts.isEmpty { prompt = texts.joined(separator: " ") }
+        }
+
+        guard let result = prompt?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !result.isEmpty,
+              !result.hasPrefix("<"),          // command/system-reminder wrappers
+              !result.hasPrefix("[Request"),   // interruption markers
+              !result.hasPrefix("Caveat:")
+        else { return nil }
+        return Transcripts.clip(result, 120)
     }
 }

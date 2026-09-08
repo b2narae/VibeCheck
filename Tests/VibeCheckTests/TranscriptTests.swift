@@ -259,6 +259,74 @@ struct CodexTranscriptTests {
     }
 }
 
+// MARK: - Finding what is buried under tool traffic
+
+@Suite("Widening tail search")
+struct WideningTests {
+    /// A transcript whose last instruction sits behind `padding` bytes of tool
+    /// noise — the shape of a long agentic turn.
+    private func buriedPrompt(padding: Int, codex: Bool) -> URL {
+        let fixture = Fixture()
+        let noise = String(repeating: "x", count: 512)
+        var lines: [String] = []
+        if codex {
+            lines.append("""
+                {"timestamp":"2026-09-08T10:00:00.000Z","type":"event_msg",\
+                "payload":{"type":"user_message","message":"the buried instruction"}}
+                """)
+        } else {
+            lines.append(#"{"type":"user","message":{"role":"user","content":"the buried instruction"}}"#)
+        }
+        var written = 0
+        while written < padding {
+            let line = codex
+                ? """
+                  {"timestamp":"2026-09-08T10:00:01.000Z","type":"response_item",\
+                  "payload":{"type":"custom_tool_call_output","output":"\(noise)"}}
+                  """
+                : """
+                  {"type":"user","message":{"role":"user","content":\
+                  [{"type":"tool_result","content":"\(noise)"}]}}
+                  """
+            lines.append(line)
+            written += line.utf8.count + 1
+        }
+        return fixture.write(lines)
+    }
+
+    @Test("A prompt just past the first window is still found", arguments: [false, true])
+    func foundPastFirstWindow(_ codex: Bool) {
+        // 400 KB of tool output: past the 256 KB window, inside the next one.
+        let file = buriedPrompt(padding: 400_000, codex: codex)
+        let reader: any TranscriptReader.Type = codex
+            ? CodexTranscript.self : ClaudeTranscript.self
+        #expect(reader.lastUserPrompt(in: file) == "the buried instruction")
+        #expect(reader.detail(in: file)?.lastPrompt == "the buried instruction")
+    }
+
+    @Test("A prompt buried megabytes back is still found", arguments: [false, true])
+    func foundFarBack(_ codex: Bool) {
+        // Measured on a real 34 MB Codex rollout: the last instruction sat
+        // 2.75 MB from the end, behind a single long tool-heavy turn.
+        let file = buriedPrompt(padding: 2_800_000, codex: codex)
+        let reader: any TranscriptReader.Type = codex
+            ? CodexTranscript.self : ClaudeTranscript.self
+        #expect(reader.lastUserPrompt(in: file) == "the buried instruction")
+    }
+
+    @Test("A transcript with no prompt at all reports nothing, without looping")
+    func noPromptTerminates() {
+        let file = buriedPrompt(padding: 10_000, codex: true)
+        // Strip the prompt line, leaving only noise.
+        let text = try! String(contentsOf: file, encoding: .utf8)
+        let withoutPrompt = text.split(separator: "\n")
+            .filter { !$0.contains("user_message") }
+            .joined(separator: "\n")
+        try! withoutPrompt.write(to: file, atomically: true, encoding: .utf8)
+        #expect(CodexTranscript.lastUserPrompt(in: file) == nil)
+    }
+}
+
 // MARK: - Shared helpers
 
 @Suite("Transcript helpers")
@@ -283,7 +351,13 @@ struct TranscriptHelperTests {
 @Suite("Codex log lookup", .serialized)
 struct CodexLookupTests {
     /// Builds a $CODEX_HOME/sessions/YYYY/MM/DD tree and points Codex at it.
-    private func makeHome(_ rollouts: [(day: String, name: String, cwd: String)]) -> URL {
+    /// `day` is the folder date; the file's mtime is set to now unless
+    /// `staleBy` says otherwise, mirroring a session that is still being
+    /// written to long after the day it started.
+    private func makeHome(
+        _ rollouts: [(day: String, name: String, cwd: String)],
+        staleBy: TimeInterval = 0
+    ) -> URL {
         let home = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("codex-home-\(UUID().uuidString)")
         for rollout in rollouts {
@@ -302,9 +376,13 @@ struct CodexLookupTests {
                 {"timestamp":"2026-09-08T10:00:01.000Z","type":"event_msg",\
                 "payload":{"type":"task_started"}}
                 """
-            try? (meta + "\n").write(
-                to: dir.appendingPathComponent("rollout-\(rollout.name).jsonl"),
-                atomically: true, encoding: .utf8)
+            let file = dir.appendingPathComponent("rollout-\(rollout.name).jsonl")
+            try? (meta + "\n").write(to: file, atomically: true, encoding: .utf8)
+            if staleBy > 0 {
+                try? FileManager.default.setAttributes(
+                    [.modificationDate: Date().addingTimeInterval(-staleBy)],
+                    ofItemAtPath: file.path)
+            }
         }
         setenv("CODEX_HOME", home.path, 1)
         return home
@@ -337,5 +415,28 @@ struct CodexLookupTests {
         _ = makeHome([(day: "2026-09-08", name: "aaa", cwd: "/Users/me/project-a")])
         #expect(CodexTranscript.logFile(projectPath: "/Users/me/elsewhere", sessionID: nil) == nil)
         #expect(CodexTranscript.logFile(projectPath: nil, sessionID: nil) == nil)
+    }
+
+    @Test("A session still running days after the day it started is still found")
+    func outlivesItsDayFolder() {
+        // Rollouts live under the date the session started, and a long session
+        // keeps appending to that same file. Selecting the newest few day
+        // folders lost exactly those sessions — the ones this reader exists
+        // for. Selection is by file mtime now, so an old folder is fine.
+        defer { unsetenv("CODEX_HOME") }
+        let old = ISO8601DateFormatter()
+        old.formatOptions = [.withFullDate, .withDashSeparatorInDate]
+        let started = old.string(from: Date().addingTimeInterval(-9 * 86_400))
+        _ = makeHome([(day: started, name: "long", cwd: "/Users/me/marathon")])
+        #expect(CodexTranscript.logFile(projectPath: "/Users/me/marathon", sessionID: nil) != nil)
+    }
+
+    @Test("A rollout nobody has touched in days is not a live session")
+    func staleRolloutIgnored() {
+        defer { unsetenv("CODEX_HOME") }
+        _ = makeHome(
+            [(day: "2026-09-08", name: "dead", cwd: "/Users/me/abandoned")],
+            staleBy: 30 * 86_400)
+        #expect(CodexTranscript.logFile(projectPath: "/Users/me/abandoned", sessionID: nil) == nil)
     }
 }
