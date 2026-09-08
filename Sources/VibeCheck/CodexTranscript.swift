@@ -11,11 +11,8 @@ enum CodexTranscript: TranscriptReader {
     /// Enough of the tail to settle the turn state, which the newest few
     /// entries always decide.
     private static let tailChunk: UInt64 = 262_144
-    /// The instruction and the last answer can sit much further back in a
-    /// tool-heavy turn — a 32 MB rollout can carry a megabyte of tool traffic
-    /// since the user last typed — so the detail pass reads a wider window,
-    /// matching what the Claude reader does.
-    private static let detailChunk: UInt64 = 1_048_576
+    /// How much of a rollout's first line to read looking for the working
+    /// directory. `session_meta` carries the whole base prompt after it.
     private static let headChunk = 65_536
     /// Rollout files live in sessions/YYYY/MM/DD under the date the session
     /// *started*, and a session that outlives that day keeps writing to the

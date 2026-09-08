@@ -3,7 +3,6 @@ import Foundation
 /// Reads Claude Code's JSONL session logs under ~/.claude/projects.
 enum ClaudeTranscript: TranscriptReader {
     private static let tailChunk: UInt64 = 262_144
-    private static let promptChunk: UInt64 = 1_048_576
 
     static var projectsDirectory: URL {
         // Claude Code honours CLAUDE_CONFIG_DIR; follow it so a relocated

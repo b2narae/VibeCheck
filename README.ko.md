@@ -145,6 +145,7 @@ Codex에는 같은 게 필요 없습니다. 롤아웃 로그에 `task_started` �
 **뭔가 이상합니다.** `./build/VibeCheck --debug` 를 돌리면 폴링마다 각 세션을 어떻게
 보고 있는지 찍힙니다. `--check-session <디렉터리>` 는 그 작업 디렉터리에 어떤 트랜스크립트를
 골랐고 거기서 무엇을 읽었는지 보여주고, `--check-usage` 는 현재 5시간 블록을 찍습니다.
+[문제 해결 문서](docs/troubleshooting.md)와 [플래그 전체 목록](docs/cli.md)도 있습니다.
 
 ---
 
@@ -232,5 +233,16 @@ swift test              # 탐지 테스트
 ```
 
 `swift build` 도 됩니다. [CONTRIBUTING.md](CONTRIBUTING.md) 를 보세요.
+
+## 문서
+
+문서는 영어로 씌어 있습니다.
+
+- [아키텍처](docs/architecture.md) — 탐지가 어떻게 동작하는지, 튜닝 상수 전부
+- [명령행 레퍼런스](docs/cli.md) — 모든 플래그와, 이 앱이 읽고 쓰는 파일 전부
+- [5시간 블록](docs/usage-window.md) — 러너의 높이가 뜻하는 것과 뜻하지 않는 것
+- [문제 해결](docs/troubleshooting.md)
+- [보안과 개인정보](SECURITY.md) — 네트워크 코드 없음. 화면 공유 시 무엇이 보이는지
+- [변경 이력](CHANGELOG.md)
 
 [English README](README.md) · MIT License

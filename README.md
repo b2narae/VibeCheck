@@ -158,7 +158,9 @@ your machine, but the panel will happily render whatever you typed.
 **Something looks wrong.** Run `./build/VibeCheck --debug` — it prints what it
 thinks each session is doing, once per poll. `--check-session <dir>` shows which
 transcript it picked for a working directory and what it read out of it, and
-`--check-usage` prints the current 5-hour block.
+`--check-usage` prints the current 5-hour block. There is a
+[troubleshooting guide](docs/troubleshooting.md) and a
+[full flag reference](docs/cli.md).
 
 ---
 
@@ -257,5 +259,14 @@ swift test              # the detection tests
 ```
 
 `swift build` works too. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Documentation
+
+- [Architecture](docs/architecture.md) — how detection works, and every tuning constant
+- [Command-line reference](docs/cli.md) — all the flags, and every file it touches
+- [The 5-hour block](docs/usage-window.md) — what the runner's height does and does not mean
+- [Troubleshooting](docs/troubleshooting.md)
+- [Security and privacy](SECURITY.md) — no network code; what is on screen when you share it
+- [Changelog](CHANGELOG.md)
 
 [한국어 README](README.ko.md) · MIT License
