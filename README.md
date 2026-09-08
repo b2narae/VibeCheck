@@ -1,5 +1,7 @@
 # VibeCheck 🐎
 
+[![CI](https://github.com/b2narae/VibeCheck/actions/workflows/ci.yml/badge.svg)](https://github.com/b2narae/VibeCheck/actions/workflows/ci.yml)
+
 **Fire off a prompt, go do something else. When the animal stops running, your AI is done.**
 
 You know the loop. You type the prompt. You tab away. Ten seconds later you tab

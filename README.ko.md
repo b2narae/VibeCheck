@@ -1,5 +1,7 @@
 # VibeCheck 🐎
 
+[![CI](https://github.com/b2narae/VibeCheck/actions/workflows/ci.yml/badge.svg)](https://github.com/b2narae/VibeCheck/actions/workflows/ci.yml)
+
 **프롬프트를 던지고 딴 일을 하세요. 동물이 멈추면 AI가 끝난 겁니다.**
 
 익숙한 루프가 있습니다. 프롬프트를 칩니다. 탭을 옮깁니다. 10초 뒤에 돌아옵니다 —

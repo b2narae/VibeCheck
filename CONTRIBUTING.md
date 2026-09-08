@@ -10,7 +10,8 @@ swift test              # 60-odd tests, under a second
 open build/VibeCheck.app
 ```
 
-Two builds exist and both must stay green:
+Two builds exist and both must stay green — CI runs both on every push and
+pull request (`.github/workflows/ci.yml`):
 
 - **`swift build` / `swift test`** — SwiftPM, Swift 6 language mode. This is the
   one CI and contributors reach for first.
