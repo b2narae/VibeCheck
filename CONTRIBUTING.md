@@ -1,5 +1,9 @@
 # Contributing
 
+Bug reports, animals and assistants all welcome. By taking part you agree to the
+[code of conduct](CODE_OF_CONDUCT.md), which is short and amounts to "be
+decent". Issues and pull requests are fine in English or Korean.
+
 VibeCheck is a single native Swift binary with no dependencies. macOS 13+ and
 the Xcode Command Line Tools are all you need.
 
@@ -50,6 +54,9 @@ Genuinely a two-minute PR.
    one distinguishing feature.
 2. Add the emoji to `RunnerSettings.animals`.
 3. Add its name to both languages in `Localization.swift`.
+
+`swift test` checks all three: a species missing its art renders as the horse,
+and one missing a name shows as "runner". Both are caught rather than shipped.
 
 ```swift
 "🦔": Species(.small, body: (0.55, 0.42, 0.32), accent: (0.30, 0.24, 0.18), accessory: .spikes),

@@ -28,13 +28,24 @@ enum L10n {
         names[emoji] ?? t("runner", "러너")
     }
 
-    private static let names: [String: String] = [
-        "🐎": t("Horse", "말"), "🦄": t("Unicorn", "유니콘"),
-        "🐫": t("Camel", "낙타"), "🐕": t("Dog", "개"),
-        "🐈": t("Cat", "고양이"), "🐇": t("Rabbit", "토끼"),
-        "🐢": t("Turtle", "거북이"), "🦖": t("T-Rex", "공룡"),
-        "🐖": t("Pig", "돼지"), "🐄": t("Cow", "소"),
-        "🦌": t("Deer", "사슴"), "🦘": t("Kangaroo", "캥거루"),
-        "🐆": t("Cheetah", "치타"), "🐿️": t("Squirrel", "다람쥐"),
+    /// The two language-pinned lookups, so a test can check that every animal
+    /// is named in both rather than only in whichever one is active.
+    static func animalNameEN(_ emoji: String) -> String { english[emoji] ?? "runner" }
+    static func animalNameKO(_ emoji: String) -> String { korean[emoji] ?? "러너" }
+
+    private static let names: [String: String] = isKorean ? korean : english
+
+    private static let english: [String: String] = [
+        "🐎": "Horse", "🦄": "Unicorn", "🐫": "Camel", "🐕": "Dog",
+        "🐈": "Cat", "🐇": "Rabbit", "🐢": "Turtle", "🦖": "T-Rex",
+        "🐖": "Pig", "🐄": "Cow", "🦌": "Deer", "🦘": "Kangaroo",
+        "🐆": "Cheetah", "🐿️": "Squirrel",
+    ]
+
+    private static let korean: [String: String] = [
+        "🐎": "말", "🦄": "유니콘", "🐫": "낙타", "🐕": "개",
+        "🐈": "고양이", "🐇": "토끼", "🐢": "거북이", "🦖": "공룡",
+        "🐖": "돼지", "🐄": "소", "🦌": "사슴", "🦘": "캥거루",
+        "🐆": "치타", "🐿️": "다람쥐",
     ]
 }

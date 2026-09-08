@@ -11,6 +11,7 @@ Elsewhere in the repo:
 
 - [README.md](../README.md) · [README.ko.md](../README.ko.md) — what it is and how to install it
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — building, adding an animal, adding an assistant
+- [CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) — be decent
 - [SECURITY.md](../SECURITY.md) — what it reads, what it writes, and what shows on screen
 - [CHANGELOG.md](../CHANGELOG.md) — what changed and when
 
